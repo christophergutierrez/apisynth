@@ -28,16 +28,11 @@ except ImportError:
     sys.exit("Error: PyYAML required. Run: pip install pyyaml")
 
 
+from constants import _SKIP_VARIANT
+
+
 class RateLimitError(Exception):
     pass
-
-# Param names excluded from variant dimensions (sort / meta / free-text / complex-array)
-_SKIP_VARIANT = frozenset({
-    "pageSize", "orderBy", "sorts", "q", "name", "query", "createdAt",
-    "requestId", "mediaGroupName", "reportingScope", "programIds", "networkIds",
-    "audienceIds", "audienceUuids", "filteredAgencyIds", "filteredAgencyAdvertiserIds",
-    "useCases", "year", "level", "cadences", "fetchRecipientAncestorPath",
-})
 
 
 def get_token(cfg: dict) -> str:

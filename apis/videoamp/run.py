@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -29,20 +30,14 @@ try:
 except ImportError:
     sys.exit("Error: PyYAML required. Run: pip install pyyaml")
 
+from constants import _SKIP_FILTER, humanize, singular, PAGE_SIZES
+
 _REPO = Path(__file__).parents[2]
+_write_lock = threading.Lock()
 
 
 class RateLimitError(Exception):
     pass
-
-# Params that are cosmetic/sort/meta — excluded from filter dimension cycling
-_SKIP_FILTER = frozenset({
-    "pageSize", "pageToken", "orderBy", "sorts", "q", "name", "query",
-    "createdAt", "requestId", "mediaGroupName", "reportingScope",
-    "programIds", "networkIds", "audienceIds", "audienceUuids",
-    "filteredAgencyIds", "filteredAgencyAdvertiserIds",
-    "useCases", "year", "level", "cadences", "fetchRecipientAncestorPath",
-})
 
 
 # ── Token ──────────────────────────────────────────────────────────────────
@@ -91,22 +86,6 @@ def api_validate(cfg: dict, token: str, query_params: dict, path_values: dict) -
         if e.code == 429:
             raise RateLimitError()
         return False
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-def humanize(s: str) -> str:
-    return s.replace("-", " ").replace("_", " ")
-
-
-def singular(s: str) -> str:
-    if s.endswith("ies"):
-        return s[:-3] + "y"
-    if s.endswith("ses"):
-        return s[:-2]
-    if s.endswith("s") and not s.endswith("ss"):
-        return s[:-1]
-    return s
 
 
 def variant_key(params: dict) -> tuple:
@@ -259,11 +238,8 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
         return results[:target]
 
     # ── List endpoint ──────────────────────────────────────────────────────
-    has_token = "pageToken" in variant_set
     filter_params = [p for p in variant_params if p not in _SKIP_FILTER]
     fval_lists = _filter_value_lists(cfg, status, filter_params)
-
-    page_sizes = [1, 3, 5, 10, 20, 25, 50, 100, 200, 500, 1000]
 
     # Build filter combos: cycle through different values for each filter param
     max_fvals = max((len(v) for v in fval_lists.values()), default=1)
@@ -272,22 +248,15 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
         combo = {fp: vals[i % len(vals)] for fp, vals in fval_lists.items()}
         filter_combos.append(combo)
 
-    def make_params(n: int, fc: dict, tok: bool) -> dict:
-        p: dict = {"pageSize": n, **fc}
-        if tok:
-            p["pageToken"] = "CAU="
-        return p
-
-    for n in page_sizes:
+    for n in PAGE_SIZES:
         unit = sing if n == 1 else resource
         for fc in filter_combos:
-            p = make_params(n, fc, has_token)
+            p = {"pageSize": n, **fc}
             fdesc = _filter_desc(cfg, fc)
             fclause = f" with {fdesc}" if fdesc else ""
-            tok_clause = " using page token CAU=" if has_token else ""
             for verb in ["Get", "List", "Show", "Fetch", "Retrieve", "Pull", "Give me"]:
-                add(f"{verb} {n} {unit}{fclause}{tok_clause}", p)
-            if not fdesc and not has_token:
+                add(f"{verb} {n} {unit}{fclause}", p)
+            if not fdesc:
                 add(f"I need {n} {unit}", p)
                 add(f"Show {n} {resource} results", p)
 
