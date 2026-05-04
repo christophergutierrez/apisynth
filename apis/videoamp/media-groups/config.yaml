@@ -1,0 +1,48 @@
+endpoint:
+  vendor: videoamp
+  name: media-groups
+  method: GET
+  path: /external/v1/content/media-groups
+  base_url: https://api.videoamp.dev/external/v1/content/media-groups
+auth:
+  type: bearer
+  env_var: VIDEOAMP_ACCESS_TOKEN
+  cli_fallback: videoamp config get --key access_token
+limits:
+  workers: 2
+  per_user_rpm: 400
+  per_tenant_rph: 4000
+params:
+  pageSize:
+    type: integer
+    required: false
+    default: 50
+    label: page size
+    cli_flag: page-size
+  pageToken:
+    type: string
+    required: false
+    label: page token
+    cli_flag: page-token
+    example: CAU=
+  name:
+    type: string
+    required: false
+    label: name search
+    cli_flag: name
+    note: Case-insensitive fuzzy match against media group name
+training:
+  target_per_variant: 30
+  output: data/{vendor}/{name}/training.jsonl
+  log: data/{vendor}/{name}/run.log.jsonl
+status:
+  variants:
+  - params:
+    - pageSize
+    confirmed: true
+    target: 30
+  - params:
+    - pageSize
+    - pageToken
+    confirmed: true
+    target: 30

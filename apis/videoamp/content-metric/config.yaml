@@ -1,0 +1,37 @@
+endpoint:
+  vendor: videoamp
+  name: content-metric
+  method: GET
+  path: /external/v1/content/metrics/{id}
+  base_url: https://api.videoamp.dev/external/v1/content/metrics
+  note: Lookup by UUID — IDs must come from prior content metrics job creation (POST
+    /external/v1/content/metrics)
+auth:
+  type: bearer
+  env_var: VIDEOAMP_ACCESS_TOKEN
+  cli_fallback: videoamp config get --key access_token
+limits:
+  workers: 2
+  per_user_rpm: 400
+  per_tenant_rph: 4000
+params: {}
+path_params:
+  id:
+    type: string
+    required: true
+    label: content metrics job UUID
+    note: Cannot be swept — UUIDs are created by POST /external/v1/content/metrics
+training:
+  target_per_variant: 30
+  output: data/{vendor}/{name}/training.jsonl
+  log: data/{vendor}/{name}/run.log.jsonl
+status:
+  id:
+    valid_values: []
+    swept_through: null
+    swept_at: null
+  variants:
+  - params:
+    - id
+    confirmed: false
+    target: 30

@@ -1,0 +1,37 @@
+endpoint:
+  vendor: videoamp
+  name: audience
+  method: GET
+  path: /v1/audiences/{id}
+  base_url: https://api.videoamp.dev/v1/audiences
+  note: Single-resource lookup — id accepts either UUID (string) or integer format
+auth:
+  type: bearer
+  env_var: VIDEOAMP_ACCESS_TOKEN
+  cli_fallback: videoamp config get --key access_token
+limits:
+  workers: 2
+  per_user_rpm: 400
+  per_tenant_rph: 4000
+params: {}
+path_params:
+  id:
+    type: string
+    required: true
+    label: audience ID (UUID or integer)
+    note: Integer IDs are 200k+ range; UUID also accepted. Seeded below from list.
+training:
+  target_per_variant: 30
+  output: data/{vendor}/{name}/training.jsonl
+  log: data/{vendor}/{name}/run.log.jsonl
+status:
+  id:
+    valid_values:
+    - 232962
+    swept_through: null
+    swept_at: null
+  variants:
+  - params:
+    - id
+    confirmed: true
+    target: 30
