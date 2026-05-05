@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Generic training data generator for any VideoAmp endpoint config.yaml.
+Generic training data generator for any endpoint config.yaml.
 
 Reads the config, counts existing records per confirmed variant, computes
 deficits, makes real API calls to validate, and writes JSONL training records.
 
 Usage:
-    python run.py --config apis/videoamp/programs/config.yaml
-    python run.py --config apis/videoamp/episode/config.yaml
+    python scripts/run.py --config apis/<vendor>/<endpoint>/config.yaml
 """
 
 import argparse
@@ -25,15 +24,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
 try:
     import yaml
 except ImportError:
     sys.exit("Error: PyYAML required. Run: pip install pyyaml")
 
-from constants import _SKIP_FILTER, humanize, singular, PAGE_SIZES
+from utils import get_skip_filter, humanize, singular, PAGE_SIZES
 
-_REPO = Path(__file__).parents[2]
+_REPO = Path(__file__).parents[1]
 _write_lock = threading.Lock()
+_CHAINED = "__chained__"
 
 
 class RateLimitError(Exception):
@@ -55,7 +57,7 @@ def get_token(cfg: dict) -> str:
             return r.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
-    sys.exit(f"No token. Set {auth['env_var']} or run `videoamp login`.")
+    sys.exit(f"No token. Set {auth['env_var']} or configure the CLI fallback.")
 
 
 # ── API call ───────────────────────────────────────────────────────────────
@@ -103,8 +105,11 @@ def count_existing(output: Path) -> dict:
                 continue
             try:
                 rec = json.loads(line)
-                key = variant_key(rec["api_call"]["params"])
-                counts[key] += 1
+                if "steps" in rec.get("api_call", {}):
+                    counts[(_CHAINED,)] += 1
+                else:
+                    key = variant_key(rec["api_call"]["params"])
+                    counts[key] += 1
             except (json.JSONDecodeError, KeyError):
                 continue
     return counts
@@ -141,6 +146,7 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
     name = cfg["endpoint"]["name"]
     resource = humanize(name)
     sing = singular(resource)
+    skip_filter = get_skip_filter(cfg)
 
     path_params_cfg = cfg.get("path_params") or {}
     params_cfg = cfg.get("params") or {}
@@ -182,7 +188,6 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
             lambda v, p=path_pname: (f"Load {sing} {v}", {p: v}),
             lambda v, p=path_pname: (f"Read {sing} {v}", {p: v}),
             lambda v, p=path_pname: (f"Access {sing} {v}", {p: v}),
-            # Indirect phrasings — key for disambiguation from list endpoints
             lambda v, p=path_pname: (f"I need to see {sing} {v}", {p: v}),
             lambda v, p=path_pname: (f"show me the details for {sing} {v}", {p: v}),
             lambda v, p=path_pname: (f"look up {sing} {v}", {p: v}),
@@ -194,7 +199,6 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
             lambda v, p=path_pname: (f"can I see {sing} {v}?", {p: v}),
             lambda v, p=path_pname: (f"tell me about {sing} {v}", {p: v}),
         ]
-        # Iterate all (phrasing × id) combos — avoids lcm-cycle trap
         for fn in phrasing_fns:
             for id_val in valid_ids:
                 q, p = fn(id_val)
@@ -203,7 +207,6 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
 
     # ── Parameterless endpoint ─────────────────────────────────────────────
     if not params_cfg:
-        # Special-case "me" — auto-generated templates produce nonsense for this resource name
         if resource == "me":
             for q in [
                 "Who am I?", "Get my user profile", "Show me my profile",
@@ -216,6 +219,32 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
                 "Who's logged in?", "Current user info", "Show authenticated user",
                 "My user details", "Tell me who I am", "pull up my user profile",
                 "My profile", "Show my account", "What's my profile?", "Get current user",
+                "Fetch my profile", "Return my user info", "What is my user account?",
+                "Display my account", "Load my profile", "Check who I am",
+                "Get the current user", "Show the logged-in user", "Who is logged in?",
+                "Get authenticated user", "Retrieve my profile", "My account info",
+                "Show me my user", "Get my user", "Fetch current user",
+                "What account am I?", "User info", "Profile info",
+                "Get user", "Show me who I am", "Retrieve current user info",
+                "Access my profile", "View my user profile", "Read my account",
+                "My user info", "What is my profile?", "Get account details",
+                "Fetch user profile", "Return my profile", "Show my user profile",
+                "Current user", "Logged in user", "Get my account info",
+                "Retrieve my account", "Pull up my profile", "What user am I?",
+                "Show account info", "Get profile", "Check my account",
+                "Fetch my account", "View my profile", "My account details",
+                "Who is the logged in user?", "What's my user info?", "Get my info",
+                "Show me my details", "Retrieve my user", "Current user details",
+                "Get current account", "My user account", "Show user details",
+                "Fetch my user", "Account info", "User profile",
+                "What are my details?", "Show my details", "Get logged in user",
+                "Who's the current user?", "My info", "Get my details",
+                "Show me my account info", "Retrieve me", "Pull my user profile",
+                "Access my account", "View my account", "Load my account",
+                "Check my user", "Display my profile", "Display my user info",
+                "Get my current profile", "Fetch my current user", "Show current account",
+                "Retrieve logged in user", "Get my user account", "Show my user account",
+                "What is my account?", "Get my user info", "Fetch me",
             ]:
                 add(q, {})
         else:
@@ -238,10 +267,9 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
         return results[:target]
 
     # ── List endpoint ──────────────────────────────────────────────────────
-    filter_params = [p for p in variant_params if p not in _SKIP_FILTER]
+    filter_params = [p for p in variant_params if p not in skip_filter]
     fval_lists = _filter_value_lists(cfg, status, filter_params)
 
-    # Build filter combos: cycle through different values for each filter param
     max_fvals = max((len(v) for v in fval_lists.values()), default=1)
     filter_combos = []
     for i in range(max(1, max_fvals)):
@@ -260,9 +288,8 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
                 add(f"I need {n} {unit}", p)
                 add(f"Show {n} {resource} results", p)
 
-    # Naturalistic (no explicit size — bare params, no default pageSize)
     for fc in filter_combos:
-        p_bare = dict(fc)  # filter params only, no pageSize
+        p_bare = dict(fc)
         fdesc = _filter_desc(cfg, fc)
         fclause = f" with {fdesc}" if fdesc else ""
         for q in [
@@ -281,6 +308,108 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
     return results
 
 
+# ── Parent ID collection ───────────────────────────────────────────────────
+
+def collect_parent_ids(cfg: dict, token: str, target: int = 50) -> list:
+    parent = cfg.get("parent", {})
+    base_url = parent["base_url"]
+    id_field = parent["id_field"]
+
+    collected = []
+    page_token = None
+    while len(collected) < target:
+        params = {"pageSize": min(50, target - len(collected))}
+        if page_token:
+            params["pageToken"] = page_token
+        url = f"{base_url}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                body = json.loads(resp.read())
+        except Exception:
+            break
+        items = body.get("data") or body.get("results") or []
+        for item in items:
+            val = item.get(id_field)
+            if val is not None and val not in collected:
+                collected.append(val)
+        page_token = body.get("paging", {}).get("nextPageToken") or body.get("next_page_token")
+        if not page_token or not items:
+            break
+    return collected
+
+
+def gen_chained_questions(cfg: dict, target: int) -> list:
+    name = cfg["endpoint"]["name"]
+    resource = humanize(name)
+    sing = singular(resource)
+
+    results = []
+    seen: set[str] = set()
+
+    def add(q: str) -> None:
+        if q not in seen and len(results) < target * 4:
+            seen.add(q)
+            results.append((q, {_CHAINED: True}))
+
+    for q in [
+        f"show me a {sing}", f"get a {sing}", f"fetch a {sing}", f"retrieve a {sing}",
+        f"show me {sing} details", f"get {sing} details", f"fetch {sing} details",
+        f"look up a {sing}", f"find a {sing}", f"show {sing} info",
+        f"get {sing} info", f"get {sing} information", f"show me {sing} information",
+        f"pull a {sing}", f"give me a {sing}", f"I need {sing} details",
+        f"show {sing}", f"get {sing}", f"fetch {sing}", f"retrieve {sing}",
+        f"load a {sing}", f"access {sing} details", f"view {sing} details",
+        f"check {sing} details", f"display {sing} details", f"read {sing} details",
+        f"show me one {sing}", f"get one {sing}", f"fetch one {sing}",
+        f"retrieve one {sing}", f"pull one {sing}", f"show me the first {sing}",
+        f"get the first {sing}", f"fetch the first {sing}",
+        f"show me my {sing}", f"get my {sing}", f"fetch my {sing}",
+        f"retrieve my {sing}", f"show me the latest {sing}", f"get the latest {sing}",
+        f"fetch the latest {sing}", f"get the most recent {sing}",
+        f"show the most recent {sing}", f"I want to see a {sing}",
+        f"can I see a {sing}?", f"can you show me a {sing}?",
+        f"tell me about a {sing}", f"give me details on a {sing}",
+        f"I need to look at a {sing}", f"inspect a {sing}", f"review a {sing}",
+        f"show a {sing}", f"get a {sing} record", f"fetch a {sing} record",
+        f"retrieve a {sing} record", f"get {sing} data", f"show {sing} data",
+        f"fetch {sing} data", f"retrieve {sing} data", f"pick a {sing}",
+        f"get {sing} by ID", f"fetch {sing} by ID", f"show {sing} by ID",
+        f"look up {sing} by ID", f"find {sing} by ID", f"retrieve {sing} by ID",
+        f"get the {sing}", f"show the {sing}", f"fetch the {sing}",
+        f"retrieve the {sing}", f"pull the {sing}", f"open a {sing}",
+        f"examine a {sing}", f"show me {sing}", f"get me a {sing}",
+        f"fetch me a {sing}", f"pull me a {sing}", f"give me {sing} info",
+        f"get {sing} details for me", f"show {sing} details for me",
+        f"what does a {sing} look like?", f"what's in a {sing}?",
+        f"show me the {sing}", f"get me the {sing}",
+    ]:
+        add(q)
+
+    return results[:target]
+
+
+def make_chained_record(cfg: dict, question: str) -> dict:
+    parent = cfg["parent"]
+    path_pname = list(cfg["path_params"].keys())[0]
+    id_field = parent["id_field"]
+    return {
+        "question": question,
+        "api_call": {
+            "steps": [
+                {
+                    "endpoint": parent["endpoint"],
+                    "params": {},
+                },
+                {
+                    "endpoint": f"{cfg['endpoint']['method']} {cfg['endpoint']['path']}",
+                    "params": {path_pname: f"{{{{steps.0.{id_field}}}}}"},
+                },
+            ]
+        },
+    }
+
+
 # ── Write record ───────────────────────────────────────────────────────────
 
 def make_record(cfg: dict, question: str, params: dict) -> dict:
@@ -296,6 +425,28 @@ def make_record(cfg: dict, question: str, params: dict) -> dict:
 # ── Run one question ───────────────────────────────────────────────────────
 
 def run_one(cfg: dict, token: str, output: Path, question: str, params: dict) -> tuple[bool, str]:
+    if params.get(_CHAINED):
+        parent = cfg.get("parent", {})
+        req = urllib.request.Request(
+            parent["base_url"], headers={"Authorization": f"Bearer {token}"}
+        )
+        t0 = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req) as resp:
+                ok = resp.status < 400
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                return False, "RATE_LIMITED"
+            ok = False
+        elapsed = round(time.perf_counter() - t0, 3)
+        if ok:
+            record = make_chained_record(cfg, question)
+            with _write_lock:
+                with open(output, "a") as f:
+                    f.write(json.dumps(record) + "\n")
+            return True, f"OK   {elapsed:.2f}s  {question[:80]}"
+        return False, f"FAIL        {question[:80]}"
+
     path_params_cfg = cfg.get("path_params") or {}
 
     path_values: dict = {}
@@ -344,6 +495,22 @@ def main():
     token = get_token(cfg)
     status = cfg.get("status") or {}
 
+    parent_cfg = cfg.get("parent")
+    if parent_cfg and cfg.get("path_params"):
+        path_pname = list(cfg["path_params"].keys())[0]
+        existing_ids = (status.get(path_pname) or {}).get("valid_values") or []
+        if len(existing_ids) < 20:
+            print(f"Collecting IDs from parent ({parent_cfg['endpoint']})...")
+            fresh_ids = collect_parent_ids(cfg, token, target=50)
+            if fresh_ids:
+                status.setdefault(path_pname, {})["valid_values"] = fresh_ids
+                print(f"  Found {len(fresh_ids)} IDs")
+                with open(config_path, "w") as f:
+                    cfg["status"] = status
+                    yaml.dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            else:
+                print(f"  WARNING: parent returned no IDs")
+
     confirmed_variants = [
         v for v in (status.get("variants") or [])
         if v.get("confirmed") and "pageToken" not in v["params"]
@@ -356,7 +523,7 @@ def main():
     print(f"\n=== {name} ===")
     print(f"Variant status (target: {target} each):")
 
-    tasks: list[tuple[str, dict, tuple]] = []  # (question, params, vkey)
+    tasks: list[tuple[str, dict, tuple]] = []
 
     for v in confirmed_variants:
         vparams = v["params"]
@@ -372,7 +539,6 @@ def main():
             print(f"    WARNING: could not generate questions for {vkey}")
             continue
 
-        # Filter to only questions not already counted, deduplicate
         added = 0
         for q, p in questions:
             if added >= deficit:
@@ -382,6 +548,23 @@ def main():
 
         if added < deficit:
             print(f"    WARNING: only generated {added}/{deficit} questions for {vkey}")
+
+    parent_cfg = cfg.get("parent")
+    if parent_cfg:
+        chained_key = (_CHAINED,)
+        have_chained = existing.get(chained_key, 0)
+        deficit = max(0, target - have_chained)
+        print(f"  {'[chained two-step]':<55} {have_chained}/{target}  {'DONE' if deficit == 0 else f'need {deficit}'}")
+        if deficit > 0:
+            chained_qs = gen_chained_questions(cfg, target)
+            added = 0
+            for q, p in chained_qs:
+                if added >= deficit:
+                    break
+                tasks.append((q, p, chained_key))
+                added += 1
+            if added < deficit:
+                print(f"    WARNING: only generated {added}/{deficit} chained questions")
 
     if not tasks:
         print("\nAll variants at target. Nothing to do.")

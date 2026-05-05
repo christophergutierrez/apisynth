@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Generate router classifier training data from all apis/videoamp/*/config.yaml files.
+Generate router classifier training data from all config.yaml files in an APIs directory.
 
 For each confirmed variant, generates question phrasings using the same logic as
 run.py but without any API calls. Writes flat (question, route_key) records.
 
-Route key mapping: endpoint name "programs" -> "videoamp/api/programs"
+Route key format: "{vendor}/api/{name}"  (e.g. "videoamp/api/programs")
+Vendor is read from each config's endpoint.vendor field.
 
 Usage:
-    python gen_router_data.py
-    python gen_router_data.py --out-dir data/videoamp/router --target 50
+    python scripts/gen_router_data.py --apis-dir apis/<vendor>
+    python scripts/gen_router_data.py --apis-dir apis/<vendor> --out-dir data/<vendor>/router --target 50
 """
 
 import argparse
@@ -18,25 +19,24 @@ import random
 import sys
 from pathlib import Path
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).parent))
-from run import gen_questions
 
-_REPO = Path(__file__).parents[2]
-_APIS_DIR = Path(__file__).parent
-_DEFAULT_OUT = _REPO / "data" / "videoamp" / "router"
+import yaml
+from run import gen_questions, gen_chained_questions
+
+_REPO = Path(__file__).parents[1]
 TRAIN_RATIO = 0.8
 SEED = 42
 
 
-def load_all_configs() -> list[tuple[str, dict]]:
+def load_all_configs(apis_dir: Path) -> list[tuple[str, dict]]:
     result = []
-    for config_path in sorted(_APIS_DIR.glob("*/config.yaml")):
+    for config_path in sorted(apis_dir.glob("*/config.yaml")):
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
         name = cfg["endpoint"]["name"]
-        route_key = f"videoamp/api/{name}"
+        vendor = cfg["endpoint"]["vendor"]
+        route_key = f"{vendor}/api/{name}"
         result.append((route_key, cfg))
     return result
 
@@ -52,10 +52,16 @@ def questions_for_config(cfg: dict, target_per_variant: int) -> list[str]:
 
     for v in confirmed:
         vparams = v["params"]
-        # Use per-variant target from config if present, else fall back to arg
         t = v.get("target") or cfg.get("training", {}).get("target_per_variant") or target_per_variant
         t = max(t, target_per_variant)
         for q, _ in gen_questions(cfg, status, vparams, t):
+            if q not in seen:
+                seen.add(q)
+                questions.append(q)
+
+    if cfg.get("parent") and cfg.get("path_params"):
+        t = cfg.get("training", {}).get("target_per_variant") or target_per_variant
+        for q, _ in gen_chained_questions(cfg, t):
             if q not in seen:
                 seen.add(q)
                 questions.append(q)
@@ -65,7 +71,8 @@ def questions_for_config(cfg: dict, target_per_variant: int) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out-dir", default=str(_DEFAULT_OUT))
+    parser.add_argument("--apis-dir", required=True, help="Directory containing endpoint subdirs with config.yaml")
+    parser.add_argument("--out-dir", default=None, help="Output directory (default: data/<vendor>/router)")
     parser.add_argument(
         "--target",
         type=int,
@@ -74,8 +81,15 @@ def main():
     )
     args = parser.parse_args()
 
-    out_dir = Path(args.out_dir)
-    configs = load_all_configs()
+    apis_dir = Path(args.apis_dir)
+    configs = load_all_configs(apis_dir)
+
+    if not configs:
+        sys.exit(f"No config.yaml files found under {apis_dir}")
+
+    # Derive output dir from vendor if not specified
+    vendor = configs[0][1]["endpoint"]["vendor"]
+    out_dir = Path(args.out_dir) if args.out_dir else _REPO / "data" / vendor / "router"
 
     all_records: list[dict] = []
     for route_key, cfg in configs:

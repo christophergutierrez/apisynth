@@ -1,7 +1,20 @@
+# Generated training data and output
 data/
+
+# Vendor-specific API configs (local only — not part of the generic framework)
+apis/
+
+# Scratch / temporary files
 tmp/
-*.log.jsonl
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 .env
+
+# Log files
+*.log.jsonl
+
+# Local notes
 issues.md

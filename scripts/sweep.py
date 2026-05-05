@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Generic sweep for any VideoAmp endpoint config.yaml.
+Generic sweep for any endpoint config.yaml.
 
 - Sweeps integer params (query or path) to find valid values
 - Confirms variant combinations via test API calls
 - Writes results back to config.yaml status section
 
 Usage:
-    python sweep.py --config apis/videoamp/episodes/config.yaml
+    python scripts/sweep.py --config apis/<vendor>/<endpoint>/config.yaml
 """
 
 import argparse
@@ -22,13 +22,14 @@ from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
 try:
     import yaml
 except ImportError:
     sys.exit("Error: PyYAML required. Run: pip install pyyaml")
 
-
-from constants import _SKIP_VARIANT
+from utils import get_skip_variant
 
 
 class RateLimitError(Exception):
@@ -48,7 +49,7 @@ def get_token(cfg: dict) -> str:
             return r.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
-    sys.exit(f"No token. Set {auth['env_var']} or run `videoamp login`.")
+    sys.exit(f"No token. Set {auth['env_var']} or configure the CLI fallback.")
 
 
 def api_get(url: str, token: str, params: dict | None = None) -> dict | None:
@@ -67,7 +68,6 @@ def api_get(url: str, token: str, params: dict | None = None) -> dict | None:
 
 
 def path_url(cfg: dict, path_values: dict) -> str:
-    """Substitute path params into the endpoint path template and return full URL."""
     domain = "/".join(cfg["endpoint"]["base_url"].split("/")[:3])
     path = cfg["endpoint"]["path"]
     for k, v in path_values.items():
@@ -78,7 +78,7 @@ def path_url(cfg: dict, path_values: dict) -> str:
 def do_sweep(
     param_name: str,
     sweep_cfg: dict,
-    is_valid_fn,  # callable(i: int) -> bool
+    is_valid_fn,
     existing: dict,
 ) -> tuple[list[int], int]:
     start = sweep_cfg["start"]
@@ -113,21 +113,16 @@ def do_sweep(
 
 
 def variant_dims(cfg: dict, status: dict) -> list[tuple[str, object]]:
-    """
-    Return (param_name, test_value) for each optional variant dimension.
-    Includes: pageToken, params with values lists, params with swept valid values.
-    Excludes params in _SKIP_VARIANT.
-    """
+    skip_variant = get_skip_variant(cfg)
     dims = []
     for pname, pcfg in (cfg.get("params") or {}).items():
-        if pname in _SKIP_VARIANT:
+        if pname in skip_variant:
             continue
         if pname == "pageToken":
             dims.append(("pageToken", pcfg.get("example", "CAU=")))
         elif "values" in pcfg and pcfg["values"]:
             dims.append((pname, pcfg["values"][0]))
         else:
-            # Also pick up params with pre-seeded or previously swept valid values
             valid = (status.get(pname) or {}).get("valid_values") or []
             if valid:
                 dims.append((pname, valid[0]))
@@ -135,12 +130,6 @@ def variant_dims(cfg: dict, status: dict) -> list[tuple[str, object]]:
 
 
 def build_variant_sets(cfg: dict, status: dict) -> list[list[str]]:
-    """
-    Build the list of variant param-key lists to confirm.
-    - Parameterless endpoint: [[]]
-    - Path-param-only endpoint: [[path_param_name, ...]]
-    - List endpoint: 2^n combos of optional dims, each with pageSize
-    """
     params_cfg = cfg.get("params") or {}
     path_params_cfg = cfg.get("path_params") or {}
 
@@ -165,7 +154,6 @@ def confirm_variants(cfg: dict, token: str, status: dict, variant_sets: list) ->
     path_params_cfg = cfg.get("path_params") or {}
     target = cfg["training"]["target_per_variant"]
 
-    # Collect sample values for all known params
     sample: dict[str, object] = {}
     for pname, pcfg in params_cfg.items():
         valid = (status.get(pname) or {}).get("valid_values") or []
@@ -247,7 +235,6 @@ def main():
 
     print(f"\n=== {name}  ({cfg['endpoint']['path']}) ===")
 
-    # Sweep query params with sweep config
     for pname, pcfg in (cfg.get("params") or {}).items():
         if "sweep" not in pcfg:
             continue
@@ -260,7 +247,6 @@ def main():
         )
         status[pname] = {"valid_values": valid, "swept_through": swept, "swept_at": now}
 
-    # Sweep path params with sweep config
     for pname, pcfg in (cfg.get("path_params") or {}).items():
         if "sweep" not in pcfg:
             continue
@@ -276,7 +262,6 @@ def main():
         )
         status[pname] = {"valid_values": valid, "swept_through": swept, "swept_at": now}
 
-    # Build and confirm variants
     v_sets = build_variant_sets(cfg, status)
     confirmed = confirm_variants(cfg, token, status, v_sets)
     status["variants"] = confirmed

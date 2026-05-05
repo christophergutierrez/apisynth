@@ -2,24 +2,15 @@
 """
 Train a logistic-regression router classifier from router_train.jsonl.
 
-Reads:  data/videoamp/router/router_train.jsonl
-        data/videoamp/router/router_test.jsonl
-
-Writes: data/videoamp/router/router_classifier.joblib
-
 Usage:
-    python train_router.py
-    python train_router.py --data-dir data/videoamp/router --out data/videoamp/router/router_classifier.joblib
+    python scripts/train_router.py --data-dir data/<vendor>/router
+    python scripts/train_router.py --data-dir data/<vendor>/router --out data/<vendor>/router/router_classifier.joblib
 """
 
 import argparse
 import json
 import sys
 from pathlib import Path
-
-_REPO = Path(__file__).parents[2]
-_DEFAULT_DATA = _REPO / "data" / "videoamp" / "router"
-_DEFAULT_OUT = _DEFAULT_DATA / "router_classifier.joblib"
 
 
 def load_jsonl(path: Path) -> tuple[list[str], list[str]]:
@@ -37,8 +28,8 @@ def load_jsonl(path: Path) -> tuple[list[str], list[str]]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default=str(_DEFAULT_DATA))
-    parser.add_argument("--out", default=str(_DEFAULT_OUT))
+    parser.add_argument("--data-dir", required=True, help="Directory containing router_train.jsonl and router_test.jsonl")
+    parser.add_argument("--out", default=None, help="Output path for classifier (default: <data-dir>/router_classifier.joblib)")
     parser.add_argument(
         "--C", type=float, default=4.0, help="LogisticRegression C (default: 4.0)"
     )
@@ -47,6 +38,7 @@ def main():
     data_dir = Path(args.data_dir)
     train_path = data_dir / "router_train.jsonl"
     test_path = data_dir / "router_test.jsonl"
+    out_path = Path(args.out) if args.out else data_dir / "router_classifier.joblib"
 
     for p in (train_path, test_path):
         if not p.exists():
@@ -91,7 +83,6 @@ def main():
     if overall_acc < 0.95:
         print("WARNING: accuracy below 95% target — consider increasing C or using SVM")
 
-    # Per-class accuracy
     print("\nPer-route accuracy:")
     for label_idx, route in enumerate(le.classes_):
         mask = y_test == label_idx
@@ -102,7 +93,6 @@ def main():
         flag = "  <<" if acc < 0.90 else ""
         print(f"  {route:<40} {acc:.3f}  (n={n}){flag}")
 
-    out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"clf": clf, "label_encoder": le}, out_path)
     print(f"\nSaved: {out_path}")
