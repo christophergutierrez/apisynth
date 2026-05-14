@@ -14,6 +14,9 @@ Usage:
     # Enrich all endpoints in-place (adds "thinking" to existing records):
     python scripts/add_thinking.py --input-dir data/videoamp
 
+    # Force re-generate thinking for records that already have it:
+    python scripts/add_thinking.py --input-dir data/videoamp --force
+
     # Dry-run: print sample thinking traces without writing:
     python scripts/add_thinking.py --input-dir data/videoamp --dry-run --sample 5
 
@@ -28,10 +31,89 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Synonym detection and domain-specific knowledge
+# ---------------------------------------------------------------------------
+
+_ENTITY_SYNONYMS: dict[str, list[str]] = {
+    "measurements": [
+        "campaign", "campaigns", "report", "reports", "ad report", "ad reports",
+        "analytics", "ad analytics", "impressions", "reach", "frequency",
+        "performance", "campaign performance", "media metrics",
+    ],
+    "measurement": ["campaign", "report", "ad report"],
+    "programs":    ["show", "shows", "series", "tv show", "tv shows"],
+    "program":     ["show", "series", "tv show"],
+    "networks":    ["channel", "channels", "tv channel", "tv channels", "broadcaster"],
+    "network":     ["channel", "tv channel"],
+    "audiences":   [
+        "segment", "segments", "demographic", "demographics",
+        "targeting segment", "targeting segments", "audience segment", "audience segments",
+    ],
+    "audience":    ["segment"],
+}
+
+# Domain-specific explanations for why synonym X maps to entity Y.
+# Key: (synonym_word, canonical_entity)
+_SYNONYM_DOMAIN_NOTES: dict[tuple[str, str], str] = {
+    ("campaign",    "measurements"): "VideoAmp has no /campaigns endpoint. Ad campaign performance data is tracked as 'ad measurements' at /external/v1/measurements.",
+    ("campaigns",   "measurements"): "VideoAmp has no /campaigns endpoint. Ad campaign data lives at /external/v1/measurements.",
+    ("report",      "measurements"): "VideoAmp has no /reports endpoint. What users call 'reports' are 'measurements' in this API.",
+    ("reports",     "measurements"): "VideoAmp has no /reports endpoint. Measurement results are at /external/v1/measurements.",
+    ("analytics",   "measurements"): "VideoAmp has no /analytics endpoint. Analytics data is surfaced through the measurements endpoint.",
+    ("impressions", "measurements"): "Impression data is a metric within VideoAmp measurements, not a separate endpoint.",
+    ("reach",       "measurements"): "Reach and frequency are metrics within ad measurements, not filter parameters or a separate endpoint.",
+    ("frequency",   "measurements"): "Reach and frequency are metrics within ad measurements, not filter parameters or a separate endpoint.",
+    ("performance", "measurements"): "Campaign performance data lives at /external/v1/measurements, not a /performance endpoint.",
+    ("channel",     "networks"):     "VideoAmp has no /channels endpoint. TV channels (broadcast networks) are 'networks' in this API at /external/v1/content/networks.",
+    ("channels",    "networks"):     "VideoAmp has no /channels endpoint. TV channels are represented as networks.",
+    ("channel",     "network"):      "VideoAmp has no /channels/{id} endpoint. TV channels are networks at /external/v1/content/networks/{id}.",
+    ("segment",     "audiences"):    "VideoAmp has no /segments endpoint. Audience segments are 'audiences' in this API at /v1/audiences.",
+    ("segments",    "audiences"):    "VideoAmp has no /segments endpoint. Targeting segments are audiences.",
+    ("segment",     "audience"):     "VideoAmp has no /segments/{id} endpoint. Audience segments are at /v1/audiences/{id}.",
+    ("demographic", "audiences"):    "VideoAmp has no /demographics endpoint. Demographic segments are audiences at /v1/audiences.",
+    ("show",        "programs"):     "'Shows' in VideoAmp are 'programs' at /external/v1/content/programs.",
+    ("shows",       "programs"):     "'Shows' in VideoAmp are 'programs' at /external/v1/content/programs.",
+    ("series",      "programs"):     "'Series' are TV programs at /external/v1/content/programs in VideoAmp.",
+    ("show",        "program"):      "'TV show' maps to a VideoAmp program at /external/v1/content/programs/{programId}.",
+    ("series",      "program"):      "'Series' maps to a VideoAmp program at /external/v1/content/programs/{programId}.",
+}
+
+# Possession/adjective phrases that should NOT be treated as filters.
+_NO_FILTER_PHRASES = [
+    "my ", "show me my ", "show my ", "list my ", "get my ",
+    "what are my ", "what's my ", "give me my ",
+]
+
+# Phrases that describe measurement types (not filter values).
+_MEASUREMENT_DESCRIPTOR_PHRASES = [
+    "reach and frequency", "reach & frequency", "ad analytics",
+    "campaign performance", "media metrics", "media performance",
+    "advertising analytics", "ad performance",
+]
+
+def _detect_synonym(question: str, entity: str) -> str | None:
+    """Return the synonym word found in question for entity, or None."""
+    q = question.lower()
+    for syn in _ENTITY_SYNONYMS.get(entity, []):
+        if syn in q:
+            return syn
+    return None
+
+def _possession_no_filter(question: str) -> bool:
+    """Return True if question uses possessive phrasing that implies no filter."""
+    q = question.lower()
+    return any(q.startswith(p) or f" {p}" in q for p in _NO_FILTER_PHRASES)
+
+def _measurement_descriptor(question: str) -> bool:
+    """Return True if question uses a phrase that describes measurement type, not a filter."""
+    q = question.lower()
+    return any(p in q for p in _MEASUREMENT_DESCRIPTOR_PHRASES)
+
+
+# ---------------------------------------------------------------------------
 # Entity and operation inference from endpoint strings
 # ---------------------------------------------------------------------------
 
-# Map endpoint path patterns to human-readable entity names
 _EP_ENTITY = [
     (r"/content/programs/\{",        "program",      True),
     (r"/content/programs$",          "programs",     False),
@@ -83,46 +165,74 @@ def _thinking_me(question: str, params: dict) -> str:
 
 
 def _thinking_by_id(question: str, entity: str, endpoint: str, params: dict) -> str:
+    list_endpoint = re.sub(r"/\{[^}]+\}$", "", endpoint)
+    synonym = _detect_synonym(question, entity)
+    domain_note = _SYNONYM_DOMAIN_NOTES.get((synonym, entity), "") if synonym else ""
+
+    lines = [f"Entity: {entity}"]
+    if domain_note:
+        lines.append(f"Domain: {domain_note}")
+    elif synonym:
+        lines.append(f"Synonym: '{synonym}' maps to {entity}")
+
     if not params:
-        return (
-            f"Entity: {entity}\n"
-            f"Operation: single-item lookup — ID should be in params\n"
-            f"Endpoint: {endpoint}\n"
-            f"Params: {{}}"
-        )
+        lines += [
+            "Scope: single item lookup -- ID should be in params",
+            f"Use:    {endpoint}",
+            f"NOT:    {list_endpoint} (that is the list endpoint)",
+        ]
+        return "\n".join(lines)
+
     id_key, id_val = next(iter(params.items()))
-    lines = [
-        f"Entity: {entity}",
-        f"Operation: single-item lookup by {id_key}",
-        f"ID: {id_key} = {id_val}",
-        f"The prompt refers to a specific {entity}, not a list",
-        f"Endpoint: {endpoint}",
+    lines += [
+        f"Scope: single item -- the prompt contains an explicit ID ({id_val})",
+        f"The number {id_val} is the {id_key}, not a page number or filter",
+        f"Use:    {endpoint}",
+        f"NOT:    {list_endpoint} (that is the list endpoint, requires an ID)",
         f"Params: {json.dumps(params)}",
     ]
     return "\n".join(lines)
 
 
 def _thinking_list(question: str, entity: str, endpoint: str, params: dict) -> str:
+    id_endpoint = endpoint.rstrip("/") + "/{id}"
+    synonym = _detect_synonym(question, entity)
+    domain_note = _SYNONYM_DOMAIN_NOTES.get((synonym, entity), "") if synonym else ""
+    is_possession = _possession_no_filter(question)
+    is_descriptor = _measurement_descriptor(question)
+
+    lines = [f"Entity: {entity}"]
+    if domain_note:
+        lines.append(f"Domain: {domain_note}")
+    elif synonym:
+        lines.append(f"Synonym: '{synonym}' maps to {entity}")
+
     if not params:
-        lines = [
-            f"Entity: {entity}",
-            "Operation: list all — no filters or page size requested",
-            f"Endpoint: {endpoint}",
+        lines.append("Scope: list all -- no ID present, return the full list")
+        if is_possession:
+            lines.append(
+                f"Possession note: '{question}' uses possessive phrasing but does NOT imply a filter. "
+                f"{endpoint} already returns only the authenticated user's data."
+            )
+        if is_descriptor and entity == "measurements":
+            lines.append(
+                "No filter: descriptive phrases like 'reach and frequency' or 'campaign performance' "
+                "describe the kind of data, not a query parameter. Do not add metric=, type=, or any filter."
+            )
+        lines += [
+            f"Use:    {endpoint}",
+            f"NOT:    {id_endpoint} (that requires an explicit numeric ID)",
             "Params: {}",
         ]
     else:
-        # Separate pageSize from filters
         page_size = params.get("pageSize")
         filters = {k: v for k, v in params.items() if k not in ("pageSize", "pageToken")}
-
-        lines = [f"Entity: {entity}", "Operation: list"]
+        lines.append("Scope: list")
         if page_size:
             lines.append(f"Requested count: {page_size}")
         if filters:
-            filter_desc = ", ".join(f"{k}={v}" for k, v in filters.items())
-            lines.append(f"Filters: {filter_desc}")
-        lines.append(f"Endpoint: {endpoint}")
-        lines.append(f"Params: {json.dumps(params)}")
+            lines.append(f"Filters: {', '.join(f'{k}={v}' for k, v in filters.items())}")
+        lines += [f"Endpoint: {endpoint}", f"Params: {json.dumps(params)}"]
 
     return "\n".join(lines)
 
@@ -157,8 +267,262 @@ def _thinking_chained(question: str, steps: list) -> str:
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Manual thinking traces for edge cases the templates cannot fully handle.
+# Keyed by normalized (lowercase, stripped) question text.
+# These override deterministic generation for exact matches.
+# ---------------------------------------------------------------------------
+
+_MANUAL: dict[str, str] = {
+
+    # --- Measurements: campaign synonyms ---
+    "list campaigns": (
+        "Entity: measurements\n"
+        "Domain: VideoAmp has no /campaigns endpoint. The word 'campaigns' here refers to ad "
+        "campaign performance data, which lives at /external/v1/measurements.\n"
+        "Scope: list all ad measurements (campaigns)\n"
+        "Use:    GET /external/v1/measurements\n"
+        "NOT:    GET /external/v1/campaigns (that endpoint does not exist in VideoAmp)\n"
+        "Params: {}"
+    ),
+    "my ad campaigns": (
+        "Entity: measurements\n"
+        "Domain: VideoAmp has no /campaigns endpoint. 'My ad campaigns' means 'my ad measurements'.\n"
+        "Possession: does NOT imply a filter -- /measurements returns all the authenticated user's data.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "show campaign data": (
+        "Entity: measurements\n"
+        "Domain: 'Campaign data' is ad measurement data in VideoAmp. There is no /campaigns endpoint.\n"
+        "Note: 'show' here means 'display', not a TV show.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "campaign performance": (
+        "Entity: measurements\n"
+        "Domain: VideoAmp has no /performance or /campaigns endpoint. Campaign performance is "
+        "tracked as ad measurements at /external/v1/measurements.\n"
+        "Descriptor: 'campaign performance' describes what kind of data -- it is not a filter value.\n"
+        "Do NOT add performance=, type=, or metric= parameters.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+
+    # --- Measurements: report synonyms ---
+    "show my reports": (
+        "Entity: measurements\n"
+        "Domain: VideoAmp has no /reports endpoint. 'Reports' in VideoAmp are called measurements.\n"
+        "Possession: 'my reports' does NOT filter by owner -- /measurements already returns only "
+        "the authenticated user's data.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "NOT:    GET /external/v1/reports (that endpoint does not exist)\n"
+        "Params: {}"
+    ),
+    "show me my report": (
+        "Entity: measurements\n"
+        "Domain: VideoAmp has no /reports endpoint. 'My report' means a measurement result.\n"
+        "Possession: does NOT imply a filter or a single-item lookup without an ID.\n"
+        "Scope: list all (no measurement ID was given)\n"
+        "Use:    GET /external/v1/measurements\n"
+        "NOT:    GET /external/v1/reports (does not exist)\n"
+        "NOT:    GET /external/v1/measurements/{id} (no ID was provided)\n"
+        "Params: {}"
+    ),
+    "my reports": (
+        "Entity: measurements\n"
+        "Domain: VideoAmp has no /reports endpoint. 'My reports' = my ad measurements.\n"
+        "Possession: does NOT imply a filter.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "my ad reports": (
+        "Entity: measurements\n"
+        "Domain: 'Ad reports' are ad measurements in VideoAmp.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "what are my ad reports": (
+        "Entity: measurements\n"
+        "Domain: VideoAmp has no /reports endpoint. 'Ad reports' = ad measurements.\n"
+        "Possession: 'my' does NOT add a filter -- /measurements returns the user's own data.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "media performance reports": (
+        "Entity: measurements\n"
+        "Domain: 'Media performance reports' are ad measurements in VideoAmp.\n"
+        "No filter: 'media performance' is a descriptor, not a query parameter.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+
+    # --- Measurements: reach/frequency/impressions ---
+    "reach and frequency data": (
+        "Entity: measurements\n"
+        "Domain: Reach and frequency are metrics within VideoAmp ad measurements. "
+        "There is no /reach endpoint and no metric= filter on /measurements.\n"
+        "Descriptor: 'reach and frequency' describes the kind of data the user wants. "
+        "It is NOT a query parameter. Do not add metric=, type=, or any filter.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "reach and frequency": (
+        "Entity: measurements\n"
+        "Domain: Reach and frequency are metrics within ad measurements, not a separate endpoint.\n"
+        "No filter: do not infer metric= or type= parameters.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "my impressions": (
+        "Entity: measurements\n"
+        "Domain: Impressions are a metric within VideoAmp ad measurements, not a separate endpoint.\n"
+        "Possession + descriptor: 'my impressions' means list my ad measurements. No filter implied.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+    "impression data": (
+        "Entity: measurements\n"
+        "Domain: Impression data is part of VideoAmp ad measurements. No /impressions endpoint exists.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/measurements\n"
+        "Params: {}"
+    ),
+
+    # --- Measurements: my measurement (disambiguation from by-ID) ---
+    "my measurement": (
+        "Entity: measurements\n"
+        "Scope: list all -- 'my measurement' uses possessive phrasing with NO numeric ID.\n"
+        "Possession: does NOT imply a filter. /measurements returns all the user's data.\n"
+        "Disambiguation: without an explicit ID (like 'measurement abc-123'), this is a list call.\n"
+        "Use:    GET /external/v1/measurements (list)\n"
+        "NOT:    GET /external/v1/measurements/{id} (that requires an explicit ID)\n"
+        "No filter: do not add status=, type=, or any inferred parameter.\n"
+        "Params: {}"
+    ),
+
+    # --- Networks: channel synonyms ---
+    "tv channels": (
+        "Entity: networks\n"
+        "Domain: VideoAmp has no /channels endpoint. TV channels (broadcast networks) are "
+        "represented as 'networks' at /external/v1/content/networks.\n"
+        "Scope: list all networks\n"
+        "Use:    GET /external/v1/content/networks\n"
+        "NOT:    GET /external/v1/content/channels (that endpoint does not exist)\n"
+        "Params: {}"
+    ),
+    "what channels exist": (
+        "Entity: networks\n"
+        "Domain: VideoAmp has no /channels endpoint. Channels are networks.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/content/networks\n"
+        "Params: {}"
+    ),
+    "show channels": (
+        "Entity: networks\n"
+        "Domain: 'Channels' = VideoAmp networks. No /channels endpoint exists.\n"
+        "Note: 'show' means display, not a TV show.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/content/networks\n"
+        "Params: {}"
+    ),
+    "list channels": (
+        "Entity: networks\n"
+        "Domain: VideoAmp has no /channels endpoint. Channels are networks.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/content/networks\n"
+        "Params: {}"
+    ),
+    "all tv channels": (
+        "Entity: networks\n"
+        "Domain: TV channels are 'networks' in VideoAmp. No /channels endpoint.\n"
+        "Scope: list all\n"
+        "Use:    GET /external/v1/content/networks\n"
+        "Params: {}"
+    ),
+
+    # --- Audiences: segment synonyms ---
+    "audience segments": (
+        "Entity: audiences\n"
+        "Domain: VideoAmp has no /segments endpoint. Audience segments are simply 'audiences' "
+        "at /v1/audiences.\n"
+        "Scope: list all\n"
+        "Use:    GET /v1/audiences\n"
+        "NOT:    GET /v1/audiences/segments (that path does not exist)\n"
+        "Params: {}"
+    ),
+    "my segments": (
+        "Entity: audiences\n"
+        "Domain: 'Segments' = VideoAmp audiences. No /segments endpoint.\n"
+        "Possession: does NOT add a filter.\n"
+        "Scope: list all\n"
+        "Use:    GET /v1/audiences\n"
+        "Params: {}"
+    ),
+    "demographic segments": (
+        "Entity: audiences\n"
+        "Domain: Demographic segments are audiences in VideoAmp. No /demographics or /segments endpoint.\n"
+        "Descriptor: 'demographic' describes the type -- it is not a query filter.\n"
+        "Scope: list all\n"
+        "Use:    GET /v1/audiences\n"
+        "Params: {}"
+    ),
+    "all segments": (
+        "Entity: audiences\n"
+        "Domain: 'Segments' = VideoAmp audiences. No /segments endpoint.\n"
+        "Scope: list all\n"
+        "Use:    GET /v1/audiences\n"
+        "Params: {}"
+    ),
+    "my audience segments": (
+        "Entity: audiences\n"
+        "Domain: Audience segments are audiences. No /segments endpoint.\n"
+        "Possession: does NOT add a filter.\n"
+        "Scope: list all\n"
+        "Use:    GET /v1/audiences\n"
+        "Params: {}"
+    ),
+
+    # --- Episodes: emphasize params must be included ---
+    "give me episode 33": (
+        "Entity: episode\n"
+        "Scope: single item -- '33' is the episodeId\n"
+        "The number 33 is the resource ID, not a page number\n"
+        "IMPORTANT: the episodeId value MUST be included in params\n"
+        "Use:    GET /external/v1/content/episodes/{episodeId}\n"
+        "NOT:    GET /external/v1/content/episodes (that is the list, no ID)\n"
+        "Params: {\"episodeId\": 33}  <-- episodeId is required, do not omit it"
+    ),
+    "see episode 22": (
+        "Entity: episode\n"
+        "Scope: single item -- '22' is the episodeId\n"
+        "The number 22 is the resource ID, not a page number\n"
+        "IMPORTANT: the episodeId value MUST be included in params\n"
+        "Use:    GET /external/v1/content/episodes/{episodeId}\n"
+        "NOT:    GET /external/v1/content/episodes (that is the list endpoint)\n"
+        "Params: {\"episodeId\": 22}  <-- episodeId is required"
+    ),
+}
+
+
 def generate_thinking(question: str, api_call: dict) -> str:
     """Return a thinking trace string for a training record."""
+    # Check manual overrides first (exact normalized match)
+    normalized = question.strip().lower()
+    if normalized in _MANUAL:
+        return _MANUAL[normalized]
+
     if "steps" in api_call:
         return _thinking_chained(question, api_call["steps"])
 
@@ -180,7 +544,7 @@ def generate_thinking(question: str, api_call: dict) -> str:
 # File processing
 # ---------------------------------------------------------------------------
 
-def enrich_file(path: Path, dry_run: bool = False, sample: int = 0) -> int:
+def enrich_file(path: Path, dry_run: bool = False, sample: int = 0, force: bool = False) -> int:
     """Read, enrich, and rewrite a training.jsonl file. Returns record count."""
     records = []
     with open(path) as f:
@@ -189,7 +553,7 @@ def enrich_file(path: Path, dry_run: bool = False, sample: int = 0) -> int:
             if not line:
                 continue
             rec = json.loads(line)
-            if "thinking" not in rec:
+            if force or "thinking" not in rec:
                 rec["thinking"] = generate_thinking(
                     rec["question"], rec["api_call"]
                 )
@@ -217,6 +581,8 @@ def main():
                         help="Directory containing endpoint subdirs with training.jsonl")
     parser.add_argument("--endpoint", default=None,
                         help="Process only this endpoint subdirectory")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-generate thinking for records that already have it")
     parser.add_argument("--dry-run", action="store_true",
                         help="Do not write files — print counts only")
     parser.add_argument("--sample", type=int, default=0,
@@ -240,7 +606,7 @@ def main():
         if not path.exists():
             print(f"  SKIP  {path} (not found)")
             continue
-        count = enrich_file(path, dry_run=args.dry_run, sample=args.sample)
+        count = enrich_file(path, dry_run=args.dry_run, sample=args.sample, force=args.force)
         action = "would write" if args.dry_run else "wrote"
         print(f"  {action}  {count:4d} records  {path.parent.name}")
         total += count
