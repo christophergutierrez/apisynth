@@ -325,12 +325,13 @@ _MANUAL: dict[str, str] = {
     ),
     "show me my report": (
         "Entity: measurements\n"
-        "Domain: VideoAmp has no /reports endpoint. 'My report' means a measurement result.\n"
-        "Possession: does NOT imply a filter or a single-item lookup without an ID.\n"
-        "Scope: list all (no measurement ID was given)\n"
+        "Domain: VideoAmp has no /reports endpoint. 'My report' is ad measurement data.\n"
+        "Decision: two wrong paths to reject explicitly:\n"
+        "  WRONG: GET /external/v1/reports — this endpoint does not exist in VideoAmp\n"
+        "  WRONG: GET /external/v1/content/programs — 'report' is not a TV program\n"
+        "Possession: 'my' does NOT add a filter. /measurements already scopes to the authenticated user.\n"
+        "No ID: no measurement ID was given, so this is a list call not a by-ID call.\n"
         "Use:    GET /external/v1/measurements\n"
-        "NOT:    GET /external/v1/reports (does not exist)\n"
-        "NOT:    GET /external/v1/measurements/{id} (no ID was provided)\n"
         "Params: {}"
     ),
     "my reports": (
@@ -516,10 +517,231 @@ _MANUAL: dict[str, str] = {
 }
 
 
-def generate_thinking(question: str, api_call: dict) -> str:
-    """Return a thinking trace string for a training record."""
-    # Check manual overrides first (exact normalized match)
+
+# ---------------------------------------------------------------------------
+# QOC thinking trace generators (Question / Option / Criteria)
+# For larger models and structured decision-matrix reasoning.
+# ---------------------------------------------------------------------------
+
+def _qoc_me(question: str, params: dict) -> str:
+    return (
+        "Question: Which endpoint returns the authenticated user's profile?\n"
+        "Option:   GET /v1/me\n"
+        "Criteria: No ID required. This endpoint always returns the current user. No alternatives.\n"
+        "Params: {}"
+    )
+
+
+def _qoc_by_id(question: str, entity: str, endpoint: str, params: dict) -> str:
+    list_endpoint = re.sub(r"/\{[^}]+\}$", "", endpoint)
+    synonym = _detect_synonym(question, entity)
+    domain_note = _SYNONYM_DOMAIN_NOTES.get((synonym, entity), "") if synonym else ""
+
+    lines = [f"Question: Retrieve a single {entity} by ID, or list all {entity}?"]
+    if domain_note:
+        lines.append(f"Domain:   {domain_note}")
+
+    if not params:
+        lines += [
+            f"Option A: {endpoint}  (single item by ID)",
+            f"Option B: {list_endpoint}  (list endpoint — no ID)",
+            "Criteria: ID required for Option A but not provided. Defaulting to single-item intent.",
+            f"Use:      {endpoint}",
+        ]
+        return "\n".join(lines)
+
+    id_key, id_val = next(iter(params.items()))
+    lines += [
+        f"Option A: {endpoint}  (single item — requires {id_key})",
+        f"Option B: {list_endpoint}  (list — no ID needed)",
+        f"Criteria: Prompt contains explicit numeric ID '{id_val}'. "
+        f"'{id_val}' is the {id_key}, not a page number or filter. Option A wins.",
+        f"Params:   {json.dumps(params)}",
+    ]
+    return "\n".join(lines)
+
+
+def _qoc_list(question: str, entity: str, endpoint: str, params: dict) -> str:
+    id_endpoint = endpoint.rstrip("/") + "/{id}"
+    synonym = _detect_synonym(question, entity)
+    domain_note = _SYNONYM_DOMAIN_NOTES.get((synonym, entity), "") if synonym else ""
+    is_possession = _possession_no_filter(question)
+    is_descriptor = _measurement_descriptor(question)
+
+    lines = [f"Question: List all {entity}, or retrieve a single {entity} by ID?"]
+    if domain_note:
+        lines.append(f"Domain:   {domain_note}")
+
+    if not params:
+        lines += [
+            f"Option A: {endpoint}  (list — no ID required)",
+            f"Option B: {id_endpoint}  (single item — requires explicit numeric ID)",
+        ]
+        criteria = "No numeric ID in prompt."
+        if is_possession:
+            criteria += (
+                f" Possessive phrasing does not imply an ID — "
+                f"{endpoint} already scopes to the authenticated user."
+            )
+        if is_descriptor and entity == "measurements":
+            criteria += (
+                " Descriptive phrase does not translate to a filter parameter. "
+                "Do not add metric=, type=, currencyOfRecord=, or any inferred filter."
+            )
+        criteria += " Option A wins."
+        lines += [f"Criteria: {criteria}", "Params:   {}"]
+    else:
+        page_size = params.get("pageSize")
+        filters = {k: v for k, v in params.items() if k not in ("pageSize", "pageToken")}
+        lines += [
+            f"Option A: {endpoint}  (list)",
+            f"Option B: {id_endpoint}  (single item — no ID in prompt)",
+            f"Criteria: No ID present; list intent confirmed."
+            + (f" Count: {page_size}." if page_size else "")
+            + (f" Filters: {', '.join(f'{k}={v}' for k,v in filters.items())}." if filters else ""),
+            f"Endpoint: {endpoint}",
+            f"Params:   {json.dumps(params)}",
+        ]
+    return "\n".join(lines)
+
+
+def _qoc_chained(question: str, steps: list) -> str:
+    if len(steps) < 2:
+        return "Multi-step operation — see steps for details"
+    step0, step1 = steps[0], steps[1]
+    entity0, _ = _infer(step0["endpoint"])
+    entity1, _ = _infer(step1["endpoint"])
+    dep = ""
+    for v in step1["params"].values():
+        m = re.search(r"\{\{steps\.0\.(\w+)\}\}", str(v))
+        if m:
+            dep = m.group(1); break
+    return (
+        f"Question: How to retrieve a specific {entity1} when only the name/context is known, not the ID?\n"
+        f"Option A: Direct GET {step1['endpoint']} — requires known {dep}\n"
+        f"Option B: Two-step — list {entity0} first, resolve ID, then fetch {entity1}\n"
+        f"Criteria: ID not supplied in prompt. Option B required.\n"
+        f"Step 0:   {step0['endpoint']} — obtain {dep}\n"
+        f"Step 1:   {step1['endpoint']} — use {{{{steps.0.{dep}}}}}"
+    )
+
+
+# QOC manual overrides for the hard synonym/disambiguation cases
+_MANUAL_QOC: dict[str, str] = {
+    "list campaigns": (
+        "Question: Which endpoint serves ad campaign data?\n"
+        "Option A: GET /external/v1/measurements  (VideoAmp ad measurements)\n"
+        "Option B: GET /external/v1/campaigns  (does not exist)\n"
+        "Criteria: VideoAmp has no /campaigns endpoint. 'Campaigns' = ad measurements. Option B is invalid. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "show me my report": (
+        "Question: Which endpoint serves 'my report' data?\n"
+        "Option A: GET /external/v1/measurements  (ad measurement results)\n"
+        "Option B: GET /external/v1/reports  (does not exist)\n"
+        "Option C: GET /external/v1/content/programs  (TV programs — unrelated)\n"
+        "Criteria: VideoAmp has no /reports endpoint. 'Report' = measurement. No ID provided, so this is a list. Options B and C are invalid. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "show my reports": (
+        "Question: Which endpoint serves 'my reports' data?\n"
+        "Option A: GET /external/v1/measurements\n"
+        "Option B: GET /external/v1/reports  (does not exist)\n"
+        "Criteria: 'Reports' = measurements. /reports does not exist. Possession does not add a filter. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "reach and frequency data": (
+        "Question: Which endpoint serves reach and frequency data?\n"
+        "Option A: GET /external/v1/measurements  (ad measurements including R&F metrics)\n"
+        "Option B: GET /external/v1/measurements with metric= filter  (invalid — no metric param)\n"
+        "Criteria: Reach and frequency are metrics within measurements, not filter values or a separate endpoint. No filter should be added. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "campaign performance": (
+        "Question: Which endpoint serves campaign performance data?\n"
+        "Option A: GET /external/v1/measurements\n"
+        "Option B: GET /external/v1/campaigns  (does not exist)\n"
+        "Criteria: VideoAmp has no /campaigns or /performance endpoint. Campaign performance = ad measurements. No filter implied. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "my impressions": (
+        "Question: Which endpoint serves impression data?\n"
+        "Option A: GET /external/v1/measurements\n"
+        "Option B: GET /external/v1/impressions  (does not exist)\n"
+        "Criteria: Impressions are a metric within ad measurements. No /impressions endpoint exists. Possession does not add a filter. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "tv channels": (
+        "Question: Which endpoint lists TV channels?\n"
+        "Option A: GET /external/v1/content/networks\n"
+        "Option B: GET /external/v1/content/channels  (does not exist)\n"
+        "Criteria: VideoAmp calls TV channels 'networks'. /channels does not exist. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "channel 45": (
+        "Question: Retrieve a single channel (network) by ID, or list all?\n"
+        "Option A: GET /external/v1/content/networks/{id}  (single network by ID)\n"
+        "Option B: GET /external/v1/content/channels/{id}  (does not exist)\n"
+        "Criteria: 'Channel' = VideoAmp network. '45' is the network ID. /channels does not exist. Option A wins.\n"
+        "Params:   {\"id\": 45}"
+    ),
+    "audience segments": (
+        "Question: Which endpoint lists audience segments?\n"
+        "Option A: GET /v1/audiences\n"
+        "Option B: GET /v1/audiences/segments  (does not exist)\n"
+        "Criteria: VideoAmp calls audience segments simply 'audiences'. /audiences/segments does not exist. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "my segments": (
+        "Question: Which endpoint lists 'my segments'?\n"
+        "Option A: GET /v1/audiences\n"
+        "Option B: GET /v1/segments  (does not exist)\n"
+        "Criteria: 'Segments' = audiences. /segments does not exist. Possession does not add a filter. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "demographic segments": (
+        "Question: Which endpoint serves demographic segments?\n"
+        "Option A: GET /v1/audiences\n"
+        "Option B: GET /v1/demographics  (does not exist)\n"
+        "Criteria: Demographic segments are audiences. /demographics and /segments do not exist. 'Demographic' is a descriptor, not a filter. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "my measurement": (
+        "Question: List all measurements, or retrieve a single measurement by ID?\n"
+        "Option A: GET /external/v1/measurements  (list)\n"
+        "Option B: GET /external/v1/measurements/{id}  (single item — requires UUID)\n"
+        "Criteria: No ID provided. Possessive 'my' does not supply an ID. /measurements already scopes to the authenticated user. Do not add status=, type=, or any inferred filter. Option A wins.\n"
+        "Params:   {}"
+    ),
+    "audiences": (
+        "Question: List all audiences, or retrieve a single audience by ID?\n"
+        "Option A: GET /v1/audiences  (list)\n"
+        "Option B: GET /v1/audiences/{id}  (single item — requires numeric ID)\n"
+        "Criteria: Bare noun with no ID. Option A wins.\n"
+        "Params:   {}"
+    ),
+}
+
+
+def generate_thinking(question: str, api_call: dict, style: str = "linear") -> str:
+    """Return a thinking trace string for a training record.
+    style: 'linear' (default, Entity/Scope/Use/NOT) or 'qoc' (Question/Option/Criteria).
+    """
     normalized = question.strip().lower()
+
+    if style == "qoc":
+        if normalized in _MANUAL_QOC:
+            return _MANUAL_QOC[normalized]
+        if "steps" in api_call:
+            return _qoc_chained(question, api_call["steps"])
+        endpoint = api_call.get("endpoint", "")
+        params = api_call.get("params", {})
+        if re.search(r"/v1/me$", endpoint):
+            return _qoc_me(question, params)
+        entity, is_by_id = _infer(endpoint)
+        return _qoc_by_id(question, entity, endpoint, params) if is_by_id else _qoc_list(question, entity, endpoint, params)
+
+    # --- linear (default) ---
     if normalized in _MANUAL:
         return _MANUAL[normalized]
 
@@ -544,7 +766,7 @@ def generate_thinking(question: str, api_call: dict) -> str:
 # File processing
 # ---------------------------------------------------------------------------
 
-def enrich_file(path: Path, dry_run: bool = False, sample: int = 0, force: bool = False) -> int:
+def enrich_file(path: Path, dry_run: bool = False, sample: int = 0, force: bool = False, style: str = "linear") -> int:
     """Read, enrich, and rewrite a training.jsonl file. Returns record count."""
     records = []
     with open(path) as f:
@@ -555,7 +777,7 @@ def enrich_file(path: Path, dry_run: bool = False, sample: int = 0, force: bool 
             rec = json.loads(line)
             if force or "thinking" not in rec:
                 rec["thinking"] = generate_thinking(
-                    rec["question"], rec["api_call"]
+                    rec["question"], rec["api_call"], style=style
                 )
             records.append(rec)
 
@@ -581,6 +803,8 @@ def main():
                         help="Directory containing endpoint subdirs with training.jsonl")
     parser.add_argument("--endpoint", default=None,
                         help="Process only this endpoint subdirectory")
+    parser.add_argument("--trace-style", choices=["linear", "qoc"], default="linear",
+                        help="Thinking trace format: 'linear' (Entity/Scope/Use) or 'qoc' (Question/Option/Criteria)")
     parser.add_argument("--force", action="store_true",
                         help="Re-generate thinking for records that already have it")
     parser.add_argument("--dry-run", action="store_true",
@@ -606,7 +830,7 @@ def main():
         if not path.exists():
             print(f"  SKIP  {path} (not found)")
             continue
-        count = enrich_file(path, dry_run=args.dry_run, sample=args.sample, force=args.force)
+        count = enrich_file(path, dry_run=args.dry_run, sample=args.sample, force=args.force, style=args.trace_style)
         action = "would write" if args.dry_run else "wrote"
         print(f"  {action}  {count:4d} records  {path.parent.name}")
         total += count
