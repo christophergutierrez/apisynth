@@ -21,7 +21,6 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -150,7 +149,6 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
 
     path_params_cfg = cfg.get("path_params") or {}
     params_cfg = cfg.get("params") or {}
-    variant_set = set(variant_params)
 
     results = []
     seen: set[str] = set()
@@ -326,7 +324,8 @@ def collect_parent_ids(cfg: dict, token: str, target: int = 50) -> list:
         try:
             with urllib.request.urlopen(req) as resp:
                 body = json.loads(resp.read())
-        except Exception:
+        except Exception as exc:
+            print(f"  WARNING: error fetching parent IDs from {base_url}: {exc}")
             break
         items = body.get("data") or body.get("results") or []
         for item in items:
@@ -466,8 +465,9 @@ def run_one(cfg: dict, token: str, output: Path, question: str, params: dict) ->
 
     if ok:
         record = make_record(cfg, question, params)
-        with open(output, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        with _write_lock:
+            with open(output, "a") as f:
+                f.write(json.dumps(record) + "\n")
         return True, f"OK   {elapsed:.2f}s  {question[:80]}"
     else:
         return False, f"FAIL        {question[:80]}"
@@ -509,7 +509,7 @@ def main():
                     cfg["status"] = status
                     yaml.dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
             else:
-                print(f"  WARNING: parent returned no IDs")
+                print("  WARNING: parent returned no IDs")
 
     confirmed_variants = [
         v for v in (status.get("variants") or [])

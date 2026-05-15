@@ -596,7 +596,7 @@ def _qoc_list(question: str, entity: str, endpoint: str, params: dict) -> str:
         lines += [
             f"Option A: {endpoint}  (list)",
             f"Option B: {id_endpoint}  (single item — no ID in prompt)",
-            f"Criteria: No ID present; list intent confirmed."
+            "Criteria: No ID present; list intent confirmed."
             + (f" Count: {page_size}." if page_size else "")
             + (f" Filters: {', '.join(f'{k}={v}' for k,v in filters.items())}." if filters else ""),
             f"Endpoint: {endpoint}",
@@ -615,7 +615,8 @@ def _qoc_chained(question: str, steps: list) -> str:
     for v in step1["params"].values():
         m = re.search(r"\{\{steps\.0\.(\w+)\}\}", str(v))
         if m:
-            dep = m.group(1); break
+            dep = m.group(1)
+            break
     return (
         f"Question: How to retrieve a specific {entity1} when only the name/context is known, not the ID?\n"
         f"Option A: Direct GET {step1['endpoint']} — requires known {dep}\n"

@@ -21,7 +21,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    sys.exit("Error: PyYAML required. Run: pip install pyyaml")
 from run import gen_questions, gen_chained_questions
 
 _REPO = Path(__file__).parents[1]

@@ -31,10 +31,8 @@ Requirements:
 
 import argparse
 import json
-import os
 import re
 import subprocess
-import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -158,6 +156,7 @@ def verify_api_call(api_call: dict) -> str:
             break
 
     if cmd is None:
+        print(f"  WARNING: no CLI mapping for endpoint '{ep}' — skipping verification")
         return f"no-cli-mapping: {ep}"
 
     try:
@@ -219,7 +218,7 @@ def main():
     args = parser.parse_args()
 
     if args.prompts:
-        prompts = [l.strip() for l in Path(args.prompts).read_text().splitlines() if l.strip()]
+        prompts = [line.strip() for line in Path(args.prompts).read_text().splitlines() if line.strip()]
     else:
         prompts = CANONICAL_PROMPTS
 

@@ -240,11 +240,13 @@ def main():
             continue
         existing = status.get(pname) or {}
         print(f"\nSweeping query param: {pname}")
-        valid, swept = do_sweep(
-            pname, pcfg["sweep"],
-            lambda i, n=pname: bool((api_get(base_url, token, {"pageSize": 1, n: i}) or {}).get("data")),
-            existing,
-        )
+        def _check_query(i, n=pname, url=base_url):
+            try:
+                return bool((api_get(url, token, {"pageSize": 1, n: i}) or {}).get("data"))
+            except Exception as exc:
+                print(f"  WARNING: unexpected error checking {n}={i}: {exc}")
+                return False
+        valid, swept = do_sweep(pname, pcfg["sweep"], _check_query, existing)
         status[pname] = {"valid_values": valid, "swept_through": swept, "swept_at": now}
 
     for pname, pcfg in (cfg.get("path_params") or {}).items():
@@ -255,11 +257,13 @@ def main():
             print(f"\nPath param {pname}: {len(existing['valid_values'])} values already known — skipping sweep.")
             continue
         print(f"\nSweeping path param: {pname}")
-        valid, swept = do_sweep(
-            pname, pcfg["sweep"],
-            lambda i, n=pname: api_get(path_url(cfg, {n: i}), token) is not None,
-            existing,
-        )
+        def _check_path(i, n=pname):
+            try:
+                return api_get(path_url(cfg, {n: i}), token) is not None
+            except Exception as exc:
+                print(f"  WARNING: unexpected error checking {n}={i}: {exc}")
+                return False
+        valid, swept = do_sweep(pname, pcfg["sweep"], _check_path, existing)
         status[pname] = {"valid_values": valid, "swept_through": swept, "swept_at": now}
 
     v_sets = build_variant_sets(cfg, status)

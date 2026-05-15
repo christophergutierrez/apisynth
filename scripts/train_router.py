@@ -70,6 +70,9 @@ def main():
 
     le = LabelEncoder()
     y_train = le.fit_transform(train_r)
+    unseen = set(test_r) - set(le.classes_)
+    if unseen:
+        sys.exit(f"Test set has labels not in training data: {unseen}\nIncrease target records or re-seed.")
     y_test = le.transform(test_r)
 
     print(f"\nTraining LogisticRegression (C={args.C})...")
