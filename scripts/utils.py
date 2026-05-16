@@ -1,5 +1,10 @@
 """Shared utilities for sweep.py, run.py, and gen_router_data.py."""
 
+import os
+import shlex
+import subprocess
+import sys
+
 # Generic pagination/sort/search params that never form useful variant dimensions.
 # Add vendor-specific params to skip via the config's top-level `skip_params` list.
 _BASE_SKIP_FILTER = frozenset({
@@ -31,3 +36,20 @@ def singular(s: str) -> str:
     if s.endswith("s") and not s.endswith("ss"):
         return s[:-1]
     return s
+
+
+def get_token(cfg: dict) -> str:
+    auth = cfg["auth"]
+    token = os.environ.get(auth["env_var"])
+    if token:
+        return token
+    try:
+        r = subprocess.run(
+            shlex.split(auth["cli_fallback"]),
+            capture_output=True, text=True, check=True,
+        )
+        if r.stdout.strip():
+            return r.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    sys.exit(f"No token. Set {auth['env_var']} or configure the CLI fallback.")

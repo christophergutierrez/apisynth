@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 def load_jsonl(path: Path) -> tuple[list[str], list[str]]:
+    """Load a router JSONL file. Return (questions, route_keys) as parallel lists."""
     questions, routes = [], []
     with open(path) as f:
         for line in f:

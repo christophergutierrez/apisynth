@@ -11,8 +11,6 @@ Usage:
 
 import argparse
 import json
-import os
-import subprocess
 import sys
 import threading
 import time
@@ -30,7 +28,7 @@ try:
 except ImportError:
     sys.exit("Error: PyYAML required. Run: pip install pyyaml")
 
-from utils import get_skip_filter, humanize, singular, PAGE_SIZES
+from utils import get_skip_filter, get_token, humanize, singular, PAGE_SIZES
 
 _REPO = Path(__file__).parents[1]
 _write_lock = threading.Lock()
@@ -41,27 +39,10 @@ class RateLimitError(Exception):
     pass
 
 
-# ── Token ──────────────────────────────────────────────────────────────────
-
-def get_token(cfg: dict) -> str:
-    auth = cfg["auth"]
-    token = os.environ.get(auth["env_var"])
-    if token:
-        return token
-    try:
-        r = subprocess.run(
-            auth["cli_fallback"].split(), capture_output=True, text=True, check=True,
-        )
-        if r.stdout.strip():
-            return r.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    sys.exit(f"No token. Set {auth['env_var']} or configure the CLI fallback.")
-
-
 # ── API call ───────────────────────────────────────────────────────────────
 
 def build_url(cfg: dict, query_params: dict, path_values: dict) -> str:
+    """Construct the full request URL from config, query params, and path param values."""
     if path_values:
         domain = "/".join(cfg["endpoint"]["base_url"].split("/")[:3])
         path = cfg["endpoint"]["path"]
@@ -78,6 +59,11 @@ def build_url(cfg: dict, query_params: dict, path_values: dict) -> str:
 
 
 def api_validate(cfg: dict, token: str, query_params: dict, path_values: dict) -> bool:
+    """Call the API and return True if the response is a success (< 400).
+
+    Used to confirm that a (question, params) training record is reachable
+    before writing it to training.jsonl.
+    """
     url = build_url(cfg, query_params, path_values)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
@@ -90,10 +76,16 @@ def api_validate(cfg: dict, token: str, query_params: dict, path_values: dict) -
 
 
 def variant_key(params: dict) -> tuple:
+    """Return a canonical tuple key for a param combination, used to count records by variant."""
     return tuple(sorted(params.keys()))
 
 
 def count_existing(output: Path) -> dict:
+    """Count existing training records per variant key in a training.jsonl file.
+
+    Returns a dict mapping variant_key tuple → record count.
+    Used by run.py to compute deficits (how many more records are needed per variant).
+    """
     counts: dict[tuple, int] = defaultdict(int)
     if not output.exists():
         return counts
@@ -309,6 +301,11 @@ def gen_questions(cfg: dict, status: dict, variant_params: list, target: int) ->
 # ── Parent ID collection ───────────────────────────────────────────────────
 
 def collect_parent_ids(cfg: dict, token: str, target: int = 50) -> list:
+    """Fetch IDs from the parent list endpoint for chained (nested) configs.
+
+    Used when an endpoint requires a parent ID (e.g., episodeId requires a programId).
+    Paginates the parent list endpoint until `target` IDs are collected.
+    """
     parent = cfg.get("parent", {})
     base_url = parent["base_url"]
     id_field = parent["id_field"]
@@ -339,6 +336,12 @@ def collect_parent_ids(cfg: dict, token: str, target: int = 50) -> list:
 
 
 def gen_chained_questions(cfg: dict, target: int) -> list:
+    """Generate natural-language questions for chained (two-step) endpoints.
+
+    These are prompts like "show me a program" where the user hasn't supplied an ID.
+    The API call requires first listing the resource to get an ID, then fetching by ID.
+    Returns list of (question, {_CHAINED: True}) tuples.
+    """
     name = cfg["endpoint"]["name"]
     resource = humanize(name)
     sing = singular(resource)
@@ -389,6 +392,11 @@ def gen_chained_questions(cfg: dict, target: int) -> list:
 
 
 def make_chained_record(cfg: dict, question: str) -> dict:
+    """Build a training record for a chained two-step API call.
+
+    The record uses {{steps.0.fieldName}} syntax to reference the ID resolved
+    from the first step's response at inference time.
+    """
     parent = cfg["parent"]
     path_pname = list(cfg["path_params"].keys())[0]
     id_field = parent["id_field"]
@@ -412,6 +420,7 @@ def make_chained_record(cfg: dict, question: str) -> dict:
 # ── Write record ───────────────────────────────────────────────────────────
 
 def make_record(cfg: dict, question: str, params: dict) -> dict:
+    """Build a standard (non-chained) training record from a confirmed (question, params) pair."""
     return {
         "question": question,
         "api_call": {
@@ -424,6 +433,11 @@ def make_record(cfg: dict, question: str, params: dict) -> dict:
 # ── Run one question ───────────────────────────────────────────────────────
 
 def run_one(cfg: dict, token: str, output: Path, question: str, params: dict) -> tuple[bool, str]:
+    """Validate one (question, params) pair against the live API and write if successful.
+
+    For chained records, validates only the parent list endpoint.
+    Returns (success, status_message). Thread-safe: uses _write_lock for file writes.
+    """
     if params.get(_CHAINED):
         parent = cfg.get("parent", {})
         req = urllib.request.Request(
@@ -595,12 +609,18 @@ def main():
             }
             for fut in as_completed(fmap):
                 i, q = fmap[fut]
-                ok, msg = fut.result()
+                try:
+                    ok, msg = fut.result()
+                except Exception as exc:
+                    print(f"[{i:4d}/{total}] ERROR: {exc}")
+                    failed += 1
+                    continue
                 print(f"[{i:4d}/{total}] {msg}")
                 if ok:
                     passed += 1
                 elif msg == "RATE_LIMITED":
                     rate_limited += 1
+                    print("  Rate limited — re-run to fill gaps (use workers=1 to enable auto-backoff).")
                 else:
                     failed += 1
 

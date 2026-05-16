@@ -161,13 +161,9 @@ def verify_api_call(api_call: dict) -> str:
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        body = json.loads(r.stdout) if r.stdout.strip() else {}
-        status = body.get("response", {}).get("status", "?")
-        return str(status) if status != "?" else ("200" if r.returncode == 0 else "error")
+        return "200" if r.returncode == 0 else f"exit:{r.returncode}"
     except Exception as e:
         return f"exception: {e}"
-
-
 # ---------------------------------------------------------------------------
 # Main bootstrap loop
 # ---------------------------------------------------------------------------
@@ -186,7 +182,7 @@ def bootstrap_one(vllm_url: str, model: str, prompt: str, verify: bool) -> dict:
     status = "skipped"
     if verify:
         status = verify_api_call(api_call)
-        ok = status in ("200", "200 OK")
+        ok = status == "200"
     else:
         ok = True  # trust the model when not verifying
 
@@ -235,7 +231,13 @@ def main():
             for p in prompts
         }
         for fut in as_completed(futures):
-            r = fut.result()
+            try:
+                r = fut.result()
+            except Exception as exc:
+                p = futures[fut]
+                print(f"  E  {p:<40s}  exception: {exc}")
+                results.append({"prompt": p, "ok": False, "error": str(exc)})
+                continue
             sym = "V" if r["ok"] else "X"
             status = r.get("status", "")
             ms = r.get("ms", 0)

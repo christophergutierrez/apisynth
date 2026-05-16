@@ -12,8 +12,6 @@ Usage:
 
 import argparse
 import json
-import os
-import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -29,30 +27,18 @@ try:
 except ImportError:
     sys.exit("Error: PyYAML required. Run: pip install pyyaml")
 
-from utils import get_skip_variant
+from utils import get_skip_variant, get_token
 
 
 class RateLimitError(Exception):
     pass
 
 
-def get_token(cfg: dict) -> str:
-    auth = cfg["auth"]
-    token = os.environ.get(auth["env_var"])
-    if token:
-        return token
-    try:
-        r = subprocess.run(
-            auth["cli_fallback"].split(), capture_output=True, text=True, check=True,
-        )
-        if r.stdout.strip():
-            return r.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    sys.exit(f"No token. Set {auth['env_var']} or configure the CLI fallback.")
-
-
 def api_get(url: str, token: str, params: dict | None = None) -> dict | None:
+    """Make a GET request to the API. Return parsed JSON body or None on 4xx/5xx.
+
+    Raises RateLimitError on HTTP 429. Re-raises other HTTP errors.
+    """
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -68,6 +54,7 @@ def api_get(url: str, token: str, params: dict | None = None) -> dict | None:
 
 
 def path_url(cfg: dict, path_values: dict) -> str:
+    """Build a URL by substituting path param values into the endpoint path template."""
     domain = "/".join(cfg["endpoint"]["base_url"].split("/")[:3])
     path = cfg["endpoint"]["path"]
     for k, v in path_values.items():
@@ -81,6 +68,13 @@ def do_sweep(
     is_valid_fn,
     existing: dict,
 ) -> tuple[list[int], int]:
+    """Sweep an integer parameter to find valid values.
+
+    Increments from sweep_cfg['start'], calling is_valid_fn(value) for each.
+    Stops after sweep_cfg['stop_after_misses'] consecutive invalid values.
+    Resumes from existing['swept_through'] if a previous partial sweep exists.
+    Returns (sorted list of valid values, highest value swept).
+    """
     start = sweep_cfg["start"]
     stop_after_misses = sweep_cfg["stop_after_misses"]
     hint_max = existing.get("swept_through") or sweep_cfg.get("hint_max", 1000)
@@ -113,6 +107,10 @@ def do_sweep(
 
 
 def variant_dims(cfg: dict, status: dict) -> list[tuple[str, object]]:
+    """Return (param_name, sample_value) pairs for each non-skipped query param.
+
+    Used to build the set of variant combinations to confirm.
+    """
     skip_variant = get_skip_variant(cfg)
     dims = []
     for pname, pcfg in (cfg.get("params") or {}).items():
@@ -130,6 +128,11 @@ def variant_dims(cfg: dict, status: dict) -> list[tuple[str, object]]:
 
 
 def build_variant_sets(cfg: dict, status: dict) -> list[list[str]]:
+    """Return all param combinations to test as variants.
+
+    For path-param endpoints, returns a single variant with the path param.
+    For list endpoints, returns the power set of (pageSize + confirmed filter params).
+    """
     params_cfg = cfg.get("params") or {}
     path_params_cfg = cfg.get("path_params") or {}
 
@@ -149,6 +152,12 @@ def build_variant_sets(cfg: dict, status: dict) -> list[list[str]]:
 
 
 def confirm_variants(cfg: dict, token: str, status: dict, variant_sets: list) -> list[dict]:
+    """Test each variant combination against the live API.
+
+    For each variant, makes one API call with pageSize=1 (or a valid path param value).
+    Returns a list of dicts with keys: params, confirmed (bool), target.
+    Variants that return data are marked confirmed=True; others are skipped.
+    """
     base_url = cfg["endpoint"]["base_url"]
     params_cfg = cfg.get("params") or {}
     path_params_cfg = cfg.get("path_params") or {}
@@ -241,11 +250,7 @@ def main():
         existing = status.get(pname) or {}
         print(f"\nSweeping query param: {pname}")
         def _check_query(i, n=pname, url=base_url):
-            try:
-                return bool((api_get(url, token, {"pageSize": 1, n: i}) or {}).get("data"))
-            except Exception as exc:
-                print(f"  WARNING: unexpected error checking {n}={i}: {exc}")
-                return False
+            return bool((api_get(url, token, {"pageSize": 1, n: i}) or {}).get("data"))
         valid, swept = do_sweep(pname, pcfg["sweep"], _check_query, existing)
         status[pname] = {"valid_values": valid, "swept_through": swept, "swept_at": now}
 
@@ -258,11 +263,7 @@ def main():
             continue
         print(f"\nSweeping path param: {pname}")
         def _check_path(i, n=pname):
-            try:
-                return api_get(path_url(cfg, {n: i}), token) is not None
-            except Exception as exc:
-                print(f"  WARNING: unexpected error checking {n}={i}: {exc}")
-                return False
+            return api_get(path_url(cfg, {n: i}), token) is not None
         valid, swept = do_sweep(pname, pcfg["sweep"], _check_path, existing)
         status[pname] = {"valid_values": valid, "swept_through": swept, "swept_at": now}
 

@@ -775,11 +775,19 @@ def enrich_file(path: Path, dry_run: bool = False, sample: int = 0, force: bool 
             line = line.strip()
             if not line:
                 continue
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"  WARNING: skipping malformed JSON line in {path.name}")
+                continue
             if force or "thinking" not in rec:
-                rec["thinking"] = generate_thinking(
-                    rec["question"], rec["api_call"], style=style
-                )
+                try:
+                    rec["thinking"] = generate_thinking(
+                        rec["question"], rec["api_call"], style=style
+                    )
+                except KeyError as e:
+                    print(f"  WARNING: skipping record missing key {e} in {path.name}")
+                    continue
             records.append(rec)
 
     if sample > 0:
