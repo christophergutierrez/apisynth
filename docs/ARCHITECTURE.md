@@ -71,7 +71,7 @@ are generated deterministically from the known-correct `api_call`. The process i
 
 1. Infer entity type and operation (list vs by-ID) from the endpoint pattern
 2. Detect synonym vocabulary in the question ("campaigns" → measurements)
-3. Look up domain-specific rejection notes ("VideoAmp has no /campaigns endpoint")
+3. Look up domain-specific rejection notes (e.g., "this API has no /campaigns endpoint — use /measurements instead")
 4. Emit a structured trace: Entity → Scope → Use (correct endpoint) → NOT (wrong endpoint)
 
 This guarantees the trace is always consistent with the correct answer and includes
@@ -85,7 +85,7 @@ handle poorly — typically complex synonym chains or disambiguation between two
 After the model is trained, it generates its own reasoning traces. The STaR (Self-Taught
 Reasoner) loop:
 
-1. Run model against prompts (typically the 70 canonical test cases + organic production logs)
+1. Run model against prompts (canonical test cases + organic production logs)
 2. Verify each generated API call against the live API (`--verify` flag)
 3. Write successful (prompt → thinking + api_call) pairs back to training data
 4. Retrain — the model learns from its own correct reasoning
@@ -129,8 +129,8 @@ training.jsonl (written by run.py, enriched by add_thinking.py):
    "api_call": {"endpoint": "GET /external/v1/content/programs/{programId}", "params": {"programId": 42}}}
 
 router_train.jsonl (written by gen_router_data.py):
-  {"question": "list all programs", "route_key": "videoamp/api/programs"}
-  {"question": "Get program 42", "route_key": "videoamp/api/program"}
+  {"question": "list all programs", "route_key": "acme/api/programs"}
+  {"question": "Get program 42",    "route_key": "acme/api/program"}
 ```
 
 ---

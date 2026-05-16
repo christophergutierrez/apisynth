@@ -147,7 +147,7 @@ The `auth` section of each config specifies:
 - `env_var`: environment variable name for the access token
 - `cli_fallback`: shell command to retrieve the token if the env var is not set
 
-> **Note:** `cli_fallback` is tokenized with `shlex.split` — use simple commands without shell quoting (e.g., `videoamp auth token`). If the command requires special shell syntax, set `env_var` directly instead.
+> **Note:** `cli_fallback` is tokenized with `shlex.split` — use simple commands without shell quoting (e.g., `<vendor> config get --key token`). If the command requires special shell syntax, set `env_var` directly instead.
 
 ## Rate limits
 

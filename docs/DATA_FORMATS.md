@@ -83,7 +83,7 @@ regenerations for canonical and MCP-log records.
   "id":                 "canonical-0001",
   "label":              "Get program 42",
   "messages": [
-    {"role": "system",    "content": "You are a VideoAmp API assistant..."},
+    {"role": "system",    "content": "You are an <vendor> API assistant..."},
     {"role": "user",      "content": "Get program 42"},
     {"role": "assistant", "content": "<think>\n...\n</think>\n```json\n{...}\n```"}
   ],
@@ -109,14 +109,14 @@ Training and test data for the intent router classifier.
 ### Schema
 
 ```json
-{"question": "list all programs", "route_key": "videoamp/api/programs"}
-{"question": "Get program 42",    "route_key": "videoamp/api/program"}
+{"question": "list all programs", "route_key": "acme/api/programs"}
+{"question": "Get program 42",    "route_key": "acme/api/program"}
 ```
 
 **`route_key`** — Hierarchical identifier: `{vendor}/api/{endpoint_name}`.
 Singular names (`program`, `episode`) indicate by-ID endpoints.
 Plural names (`programs`, `episodes`) indicate list endpoints.
-The top-level router key (`videoamp/api`) is a special case used by the LoRA router adapter.
+The top-level router key (`acme/api`) is a special case used by the LoRA router adapter.
 
 ---
 
@@ -150,7 +150,7 @@ The format expected by trainLLM for SFT. Produced by `prepare_data.py`.
 ```json
 {
   "conversations": [
-    {"from": "system", "value": "You are a VideoAmp API assistant..."},
+    {"from": "system", "value": "You are an <vendor> API assistant..."},
     {"from": "human",  "value": "Get program 42"},
     {"from": "gpt",    "value": "<think>\nEntity: program\n...\n</think>\n```json\n{...}\n```"}
   ]

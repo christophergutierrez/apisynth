@@ -12,14 +12,14 @@ The sweep ran but nothing passed the confirmation step.
 **Check first:**
 ```bash
 # Was the token valid?
-videoamp me
+<vendor> me    # or however your vendor CLI checks auth
 
 # Did the sweep actually find valid values?
 grep "valid_values" apis/<vendor>/<endpoint>/config.yaml
 ```
 
 **Common causes:**
-- Auth token expired — run `videoamp login`
+- Auth token expired — re-authenticate using your vendor CLI or refresh the token in `env_var`
 - The param range in `config.yaml` doesn't overlap real data (e.g., `range: [1, 100]` but IDs start at 10000)
 - The endpoint requires a filter param to return results (e.g., `networkId` required to get episodes) — add it to `params` in config before sweeping
 - Rate limited mid-sweep — the script will print `WARNING: rate limited`, wait 60s and retry; if it still fails, rerun sweep and it picks up from existing `swept_through`
@@ -88,7 +88,7 @@ The model generated an endpoint that has no CLI equivalent in `CLI_MAP`. The rec
 Run with `--dry-run` first to inspect outputs before writing. Check that the vLLM server is running and the correct adapter is loaded.
 
 ### Verification returning errors on valid calls
-The `videoamp` CLI must be authenticated. Run `videoamp login` then retry.
+The vendor CLI must be authenticated. Check that `auth.env_var` is set or `auth.cli_fallback` works, then retry.
 
 ---
 
@@ -119,8 +119,9 @@ A key in the `training:` section of `config.yaml` isn't in `_KNOWN_TRAINING_KEYS
 
 ## General
 
-### "Please use 'videoamp login' before running this command"
-Token expired. Run `videoamp login` to refresh. Tokens typically last 8 hours.
+### "Auth token required" / "Please log in" / similar auth errors
+Token expired or not set. Re-authenticate via your vendor CLI or set the `env_var` token directly.
+Token lifetime varies by vendor — check vendor documentation.
 
 ### Script crashes with `ModuleNotFoundError: yaml`
 ```bash

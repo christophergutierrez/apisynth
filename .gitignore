@@ -3,6 +3,9 @@ data/
 
 # Vendor-specific API configs (local only — not part of the generic framework)
 apis/
+# ...except the example vendor, which is a template showing what to create
+!apis/example/
+!apis/example/**
 
 # Scratch / temporary files
 tmp/

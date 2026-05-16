@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
 STaR bootstrap: run the trained model against prompts, verify against the
-VideoAmp API, and write successful (prompt → thinking + api_call) pairs back
+live API, and write successful (prompt → thinking + api_call) pairs back
 to training.jsonl format.
 
 The model's own correct reasoning traces become training data — the system
 improves itself with each production cycle.
 
 Usage:
-    # Run against the canonical 70 test prompts:
+    # Run against vendor's canonical prompts:
     python scripts/bootstrap_traces.py \
-        --model api-thinking \
-        --vllm-url http://192.168.2.103:8000 \
-        --output data/videoamp/bootstrapped/training.jsonl
+        --model <adapter-name> \
+        --vllm-url http://<host>:8000 \
+        --vendor-dir apis/<vendor> \
+        --output data/<vendor>/bootstrapped/training.jsonl
 
     # Run against a custom prompt file (one prompt per line):
     python scripts/bootstrap_traces.py \
-        --model api-thinking \
-        --vllm-url http://192.168.2.103:8000 \
+        --model <adapter-name> \
+        --vllm-url http://<host>:8000 \
         --prompts prompts.txt \
-        --output data/videoamp/bootstrapped/training.jsonl
+        --output data/<vendor>/bootstrapped/training.jsonl
 
     # Dry-run: print results without writing:
-    python scripts/bootstrap_traces.py --model api-thinking --dry-run
+    python scripts/bootstrap_traces.py --model <adapter-name> --dry-run
 
 Requirements:
     - vLLM server running with the trained model
-    - VIDEOAMP_ACCESS_TOKEN set (or videoamp CLI configured)
+    - auth token set via env_var or cli_fallback (see config.yaml)
 """
 
 import argparse
@@ -42,30 +43,21 @@ from pathlib import Path
 # Default prompt set — the 70 canonical test cases
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Default prompt set — override with --prompts or --vendor-dir
+# A minimal generic fallback; real prompts live in apis/<vendor>/canonical_prompts.txt
+# ---------------------------------------------------------------------------
+
 CANONICAL_PROMPTS = [
-    "Get program 42", "Get me", "Who am I?", "I need to see episode 99",
-    "show me my measurements", "list all programs", "who is the current user",
-    "show my account", "fetch program 7", "show all TV shows", "get episode 200",
-    "find episode 15", "what are my ad reports", "show all measurements",
-    "list all networks", "what networks are available", "show audiences",
-    "what audiences do I have", "list all episodes", "browse episodes",
-    "episode 5", "see episode 22", "pull up episode 42", "show episode 77",
-    "episode number 100", "give me episode 33", "I want to see episode 8",
-    "look at episode 11", "program 100", "what is program 55", "view program 12",
-    "TV show 42", "series 7", "show me all shows", "all series", "browse shows",
-    "what shows do you have", "my measurement", "my report", "show me my report",
-    "list campaigns", "show my reports", "ad analytics", "reach and frequency data",
-    "campaign performance", "my impressions", "TV channels", "all channels",
-    "what channels exist", "channel 45", "network 12", "audience segments",
-    "my segments", "demographic segments", "audience 101", "segment 55",
-    "programs", "episodes", "measurements", "networks", "audiences",
-    "my profile", "user information", "who owns this account", "show my details",
-    "measurement 5", "get measurement 5", "network 7", "get network 7",
-    "get audience 101",
+    "list all items",
+    "get item 1",
+    "show me item 42",
+    "what items are available",
+    "find item 7",
 ]
 
 SYSTEM = (
-    "You are a VideoAmp API assistant. Given a natural language request, respond with the correct API call "
+    "You are an API assistant. Given a natural language request, respond with the correct API call "
     "as a JSON object inside a code block. Think through the request before answering. "
     'For a single call use: {"endpoint": "GET /...", "params": {...}}. '
     "For a two-step call (when an ID must be fetched first) use: "
@@ -122,21 +114,55 @@ def parse_api_call(answer: str) -> dict | None:
 # API verification
 # ---------------------------------------------------------------------------
 
-CLI_MAP = {
-    r"GET /external/v1/content/programs/\{": lambda p: ["videoamp", "content", "get-program", "--programId", str(p.get("programId", ""))],
-    r"GET /external/v1/content/programs$":   lambda p: ["videoamp", "content", "list-programs"],
-    r"GET /external/v1/content/episodes/\{": lambda p: ["videoamp", "content", "get-episode", "--episodeId", str(p.get("episodeId", ""))],
-    r"GET /external/v1/content/episodes$":   lambda p: ["videoamp", "content", "list-episodes"],
-    r"GET /external/v1/content/networks/\{": lambda p: ["videoamp", "content", "get-network", "--id", str(p.get("id", ""))],
-    r"GET /external/v1/content/networks$":   lambda p: ["videoamp", "content", "list-networks"],
-    r"GET /external/v1/measurements/\{":     lambda p: ["videoamp", "measurements", "get-ad", "--id", str(p.get("id", ""))],
-    r"GET /external/v1/measurements$":       lambda p: ["videoamp", "measurements", "list-ad"],
-    r"GET /v1/audiences/\{":                 lambda p: ["videoamp", "audiences", "get", "--id", str(p.get("id", ""))],
-    r"GET /v1/audiences$":                   lambda p: ["videoamp", "audiences", "list"],
-    r"GET /v1/me$":                          lambda p: ["videoamp", "me"],
-    r"GET /external/v1/currency-of-record":  lambda p: ["videoamp", "currency-of-record", "list"],
-    r"GET /v1/consents$":                    lambda p: ["videoamp", "consents", "list"],
-}
+# ---------------------------------------------------------------------------
+# API verification
+# ---------------------------------------------------------------------------
+
+# CLI_MAP is loaded from apis/<vendor>/cli_verification.yaml by load_vendor_config().
+# Each entry maps an endpoint pattern (regex) to a CLI command list.
+# See apis/example/cli_verification.yaml for the format.
+CLI_MAP: dict = {}
+
+
+def load_vendor_config(vendor_dir: str) -> None:
+    """Load vendor-specific prompts and CLI verification map from <vendor_dir>.
+
+    Reads:
+      <vendor_dir>/canonical_prompts.txt  — one prompt per line
+      <vendor_dir>/cli_verification.yaml — CLI command mappings for --verify
+
+    Call before main() or pass --vendor-dir on the CLI.
+    """
+    global CANONICAL_PROMPTS, CLI_MAP
+    from pathlib import Path as _Path
+    vdir = _Path(vendor_dir).expanduser()
+
+    prompts_file = vdir / "canonical_prompts.txt"
+    if prompts_file.exists():
+        CANONICAL_PROMPTS = [
+            l.strip() for l in prompts_file.read_text().splitlines()
+            if l.strip() and not l.startswith("#")
+        ]
+
+    cli_file = vdir / "cli_verification.yaml"
+    if cli_file.exists():
+        try:
+            import yaml
+        except ImportError:
+            import sys; sys.exit("PyYAML required: pip install pyyaml")
+        data = yaml.safe_load(cli_file.read_text()) or {}
+        new_map = {}
+        for entry in data.get("cli_map", []):
+            pattern = entry["pattern"]
+            cmd_template = entry["command"]
+            # Build a lambda that substitutes {param} placeholders from params dict
+            def make_builder(tmpl):
+                def builder(p):
+                    return [str(p.get(a[1:-1], a)) if a.startswith("{") and a.endswith("}") else a
+                            for a in tmpl]
+                return builder
+            new_map[pattern] = make_builder(cmd_template)
+        CLI_MAP = new_map
 
 
 def verify_api_call(api_call: dict) -> str:
@@ -208,10 +234,16 @@ def main():
     parser.add_argument("--output",    default=None,
                         help="Output training.jsonl path")
     parser.add_argument("--verify",    action="store_true",
-                        help="Verify each api_call against the live VideoAmp API")
+                        help="Verify each api_call against the live API (requires cli_verification.yaml)")
     parser.add_argument("--workers",   type=int, default=5)
+    parser.add_argument("--vendor-dir", default=None,
+                        help="Path to vendor directory (e.g. apis/videoamp) containing "
+                             "canonical_prompts.txt and cli_verification.yaml")
     parser.add_argument("--dry-run",   action="store_true")
     args = parser.parse_args()
+
+    if args.vendor_dir:
+        load_vendor_config(args.vendor_dir)
 
     if args.prompts:
         prompts = [line.strip() for line in Path(args.prompts).read_text().splitlines() if line.strip()]

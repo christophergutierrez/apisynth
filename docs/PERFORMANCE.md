@@ -15,8 +15,8 @@ How to balance speed, data quality, and rate limit compliance.
 | 120–300 req/min | 4 |
 | > 300 req/min | 8 |
 
-The VideoAmp API allows 400 req/min per user and 4,000/hour per tenant.
-With `workers: 2` and ~0.3s per call, peak usage is ~120 req/min — well within limits.
+Your API's rate limits are in `config.yaml` under `limits`. With `workers: 2` and ~0.3s per call,
+peak usage is ~120 req/min — check this against your vendor's documented limits.
 
 **Rule of thumb:** Start at 2. If you see `RATE_LIMITED` in output, drop to 1.
 
