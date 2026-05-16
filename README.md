@@ -26,10 +26,16 @@ The training data teaches an LLM *intent → API parameters*, not API responses.
 ## Prerequisites
 
 ```bash
+pip install -r requirements.txt             # all scripts (pinned versions)
+# or manually:
 pip install pyyaml                          # all scripts
 pip install sentence-transformers scikit-learn joblib  # train_router.py only
 # vLLM server required for bootstrap_traces.py (see its --vllm-url flag)
 ```
+
+> **Note:** The router classifier artifact (`router_classifier.joblib`) is sensitive to the
+> sklearn version used to train it. Use `requirements.txt` to ensure the version used at
+> inference matches the version used to generate the file.
 
 ## Repository structure
 
@@ -140,6 +146,16 @@ python apis/<vendor>/generate_holdouts.py
 3. Run `sweep.py` to populate the `status` section
 4. Run `run.py` to generate training records
 5. Optionally create vendor-specific wrapper scripts (`sweep.sh`, `run.sh`, etc.)
+
+> **Note on committing vendor files:** `apis/` is gitignored by default — vendor configs
+> are intended to be local-only. If your vendor includes Python scripts that override
+> pipeline behavior (e.g., a custom `run.py` or `generate_holdouts.py`), add a gitignore
+> exception to track those files:
+> ```
+> !apis/<vendor>/
+> !apis/<vendor>/**
+> ```
+> See `apis/videoamp/` as the reference implementation.
 
 ## Auth
 

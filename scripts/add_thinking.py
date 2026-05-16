@@ -37,6 +37,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import FIELD_QUESTION, FIELD_API_CALL, FIELD_THINKING
+
 # ---------------------------------------------------------------------------
 # Synonym detection and domain-specific knowledge
 #
@@ -445,10 +448,10 @@ def enrich_file(path: Path, dry_run: bool = False, sample: int = 0, force: bool 
             except json.JSONDecodeError:
                 print(f"  WARNING: skipping malformed JSON line in {path.name}")
                 continue
-            if force or "thinking" not in rec:
+            if force or FIELD_THINKING not in rec:
                 try:
-                    rec["thinking"] = generate_thinking(
-                        rec["question"], rec["api_call"], style=style
+                    rec[FIELD_THINKING] = generate_thinking(
+                        rec[FIELD_QUESTION], rec[FIELD_API_CALL], style=style
                     )
                 except KeyError as e:
                     print(f"  WARNING: skipping record missing key {e} in {path.name}")
@@ -457,9 +460,9 @@ def enrich_file(path: Path, dry_run: bool = False, sample: int = 0, force: bool 
 
     if sample > 0:
         for rec in records[:sample]:
-            print(f"\nQ: {rec['question']!r}")
-            print(f"Thinking:\n{rec['thinking']}")
-            print(f"Answer: {json.dumps(rec['api_call'])[:80]}")
+            print(f"\nQ: {rec[FIELD_QUESTION]!r}")
+            print(f"Thinking:\n{rec[FIELD_THINKING]}")
+            print(f"Answer: {json.dumps(rec[FIELD_API_CALL])[:80]}")
         return len(records)
 
     if not dry_run:

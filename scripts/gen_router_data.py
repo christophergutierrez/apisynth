@@ -21,10 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils import CFG_VARIANTS, CFG_CONFIRMED, CFG_TARGET_PER_VARIANT, FIELD_QUESTION, \
+    PYYAML_REQUIRED
+
 try:
     import yaml
 except ImportError:
-    sys.exit("Error: PyYAML required. Run: pip install pyyaml")
+    sys.exit(PYYAML_REQUIRED)
 from run import gen_questions, gen_chained_questions
 
 _REPO = Path(__file__).parents[1]
@@ -46,7 +49,7 @@ def load_all_configs(apis_dir: Path) -> list[tuple[str, dict]]:
 
 def questions_for_config(cfg: dict, target_per_variant: int) -> list[str]:
     status = cfg.get("status") or {}
-    confirmed = [v for v in (status.get("variants") or []) if v.get("confirmed")]
+    confirmed = [v for v in (status.get(CFG_VARIANTS) or []) if v.get(CFG_CONFIRMED)]
     if not confirmed:
         return []
 
@@ -55,7 +58,7 @@ def questions_for_config(cfg: dict, target_per_variant: int) -> list[str]:
 
     for v in confirmed:
         vparams = v["params"]
-        t = v.get("target") or cfg.get("training", {}).get("target_per_variant") or target_per_variant
+        t = v.get("target") or cfg.get("training", {}).get(CFG_TARGET_PER_VARIANT) or target_per_variant
         t = max(t, target_per_variant)
         for q, _ in gen_questions(cfg, status, vparams, t):
             if q not in seen:
@@ -63,7 +66,7 @@ def questions_for_config(cfg: dict, target_per_variant: int) -> list[str]:
                 questions.append(q)
 
     if cfg.get("parent") and cfg.get("path_params"):
-        t = cfg.get("training", {}).get("target_per_variant") or target_per_variant
+        t = cfg.get("training", {}).get(CFG_TARGET_PER_VARIANT) or target_per_variant
         for q, _ in gen_chained_questions(cfg, t):
             if q not in seen:
                 seen.add(q)
@@ -98,7 +101,7 @@ def main():
     for route_key, cfg in configs:
         questions = questions_for_config(cfg, args.target)
         for q in questions:
-            all_records.append({"question": q, "route_key": route_key})
+            all_records.append({FIELD_QUESTION: q, "route_key": route_key})
         status = f"{len(questions)} questions" if questions else "no confirmed variants — skipped"
         print(f"  {route_key}: {status}")
 

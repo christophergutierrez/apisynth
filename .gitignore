@@ -6,6 +6,9 @@ apis/
 # ...except the example vendor, which is a template showing what to create
 !apis/example/
 !apis/example/**
+# ...except videoamp, which is the reference implementation (scripts committed)
+!apis/videoamp/
+!apis/videoamp/**
 
 # Scratch / temporary files
 tmp/

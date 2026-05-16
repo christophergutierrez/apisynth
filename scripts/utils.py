@@ -15,6 +15,18 @@ _BASE_SKIP_VARIANT = _BASE_SKIP_FILTER - {"pageToken"}
 
 PAGE_SIZES = [1, 3, 5, 10, 20, 25, 50, 100, 200, 500, 1000]
 
+PYYAML_REQUIRED = "Error: PyYAML required. Run: pip install pyyaml"
+
+# JSONL record field names
+FIELD_QUESTION = "question"
+FIELD_API_CALL = "api_call"
+FIELD_THINKING = "thinking"
+
+# Config schema keys
+CFG_VARIANTS = "variants"
+CFG_CONFIRMED = "confirmed"
+CFG_TARGET_PER_VARIANT = "target_per_variant"
+
 
 def get_skip_filter(cfg: dict) -> frozenset:
     return _BASE_SKIP_FILTER | frozenset(cfg.get("skip_params") or [])

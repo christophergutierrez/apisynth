@@ -34,10 +34,14 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import FIELD_QUESTION, FIELD_API_CALL, FIELD_THINKING
 
 # ---------------------------------------------------------------------------
 # Default prompt set — override with --prompts or --vendor-dir
@@ -132,8 +136,8 @@ def load_vendor_config(vendor_dir: str) -> None:
     prompts_file = vdir / "canonical_prompts.txt"
     if prompts_file.exists():
         CANONICAL_PROMPTS = [
-            l.strip() for l in prompts_file.read_text().splitlines()
-            if l.strip() and not l.startswith("#")
+            line.strip() for line in prompts_file.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
         ]
 
     cli_file = vdir / "cli_verification.yaml"
@@ -141,7 +145,7 @@ def load_vendor_config(vendor_dir: str) -> None:
         try:
             import yaml
         except ImportError:
-            import sys; sys.exit("PyYAML required: pip install pyyaml")
+            sys.exit("PyYAML required: pip install pyyaml")
         data = yaml.safe_load(cli_file.read_text()) or {}
         new_map = {}
         for entry in data.get("cli_map", []):
@@ -209,8 +213,8 @@ def bootstrap_one(vllm_url: str, model: str, prompt: str, verify: bool) -> dict:
     return {
         "prompt": prompt,
         "ok": ok,
-        "api_call": api_call,
-        "thinking": thinking,
+        FIELD_API_CALL: api_call,
+        FIELD_THINKING: thinking,
         "status": status,
         "ms": result["ms"],
         "comp_tokens": result["comp_tokens"],
@@ -270,7 +274,7 @@ def main():
             print(f"  {sym}  {r['prompt']:<40s}  {status:<8}  {ms:.0f}ms")
             results.append(r)
 
-    passed = [r for r in results if r["ok"] and "api_call" in r]
+    passed = [r for r in results if r["ok"] and FIELD_API_CALL in r]
     failed = [r for r in results if not r["ok"]]
     print(f"\n{len(passed)}/{len(prompts)} passed")
     if failed:
@@ -288,9 +292,9 @@ def main():
     with open(out, "a") as f:
         for r in passed:
             record = {
-                "question": r["prompt"],
-                "api_call": r["api_call"],
-                "thinking": r["thinking"],
+                FIELD_QUESTION: r["prompt"],
+                FIELD_API_CALL: r[FIELD_API_CALL],
+                FIELD_THINKING: r[FIELD_THINKING],
                 "source": "bootstrap",
             }
             f.write(json.dumps(record) + "\n")

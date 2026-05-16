@@ -23,12 +23,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils import get_skip_filter, get_token, humanize, singular, PAGE_SIZES, \
+    PYYAML_REQUIRED, FIELD_QUESTION, FIELD_API_CALL, CFG_VARIANTS, CFG_CONFIRMED, \
+    CFG_TARGET_PER_VARIANT
+
 try:
     import yaml
 except ImportError:
-    sys.exit("Error: PyYAML required. Run: pip install pyyaml")
-
-from utils import get_skip_filter, get_token, humanize, singular, PAGE_SIZES
+    sys.exit(PYYAML_REQUIRED)
 
 _REPO = Path(__file__).parents[1]
 _write_lock = threading.Lock()
@@ -96,10 +98,10 @@ def count_existing(output: Path) -> dict:
                 continue
             try:
                 rec = json.loads(line)
-                if "steps" in rec.get("api_call", {}):
+                if "steps" in rec.get(FIELD_API_CALL, {}):
                     counts[(_CHAINED,)] += 1
                 else:
-                    key = variant_key(rec["api_call"]["params"])
+                    key = variant_key(rec[FIELD_API_CALL]["params"])
                     counts[key] += 1
             except (json.JSONDecodeError, KeyError):
                 continue
@@ -401,8 +403,8 @@ def make_chained_record(cfg: dict, question: str) -> dict:
     path_pname = list(cfg["path_params"].keys())[0]
     id_field = parent["id_field"]
     return {
-        "question": question,
-        "api_call": {
+        FIELD_QUESTION: question,
+        FIELD_API_CALL: {
             "steps": [
                 {
                     "endpoint": parent["endpoint"],
@@ -422,8 +424,8 @@ def make_chained_record(cfg: dict, question: str) -> dict:
 def make_record(cfg: dict, question: str, params: dict) -> dict:
     """Build a standard (non-chained) training record from a confirmed (question, params) pair."""
     return {
-        "question": question,
-        "api_call": {
+        FIELD_QUESTION: question,
+        FIELD_API_CALL: {
             "endpoint": f"{cfg['endpoint']['method']} {cfg['endpoint']['path']}",
             "params": params,
         },
@@ -500,7 +502,7 @@ def main():
 
     name = cfg["endpoint"]["name"]
     vendor = cfg["endpoint"]["vendor"]
-    target = cfg["training"]["target_per_variant"]
+    target = cfg["training"][CFG_TARGET_PER_VARIANT]
     workers = cfg["limits"]["workers"]
 
     output = _REPO / "data" / vendor / name / "training.jsonl"
@@ -526,8 +528,8 @@ def main():
                 print("  WARNING: parent returned no IDs")
 
     confirmed_variants = [
-        v for v in (status.get("variants") or [])
-        if v.get("confirmed") and "pageToken" not in v["params"]
+        v for v in (status.get(CFG_VARIANTS) or [])
+        if v.get(CFG_CONFIRMED) and "pageToken" not in v["params"]
     ]
     if not confirmed_variants:
         sys.exit("No confirmed variants. Run sweep.py first.")
