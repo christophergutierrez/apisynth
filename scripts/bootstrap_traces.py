@@ -40,10 +40,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Default prompt set — the 70 canonical test cases
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Default prompt set — override with --prompts or --vendor-dir
 # A minimal generic fallback; real prompts live in apis/<vendor>/canonical_prompts.txt
 # ---------------------------------------------------------------------------
@@ -109,10 +105,6 @@ def parse_api_call(answer: str) -> dict | None:
     except Exception:
         return None
 
-
-# ---------------------------------------------------------------------------
-# API verification
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # API verification
@@ -190,6 +182,8 @@ def verify_api_call(api_call: dict) -> str:
         return "200" if r.returncode == 0 else f"exit:{r.returncode}"
     except Exception as e:
         return f"exception: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Main bootstrap loop
 # ---------------------------------------------------------------------------
@@ -237,7 +231,7 @@ def main():
                         help="Verify each api_call against the live API (requires cli_verification.yaml)")
     parser.add_argument("--workers",   type=int, default=5)
     parser.add_argument("--vendor-dir", default=None,
-                        help="Path to vendor directory (e.g. apis/videoamp) containing "
+                        help="Path to vendor directory (e.g. apis/acme) containing "
                              "canonical_prompts.txt and cli_verification.yaml")
     parser.add_argument("--dry-run",   action="store_true")
     args = parser.parse_args()

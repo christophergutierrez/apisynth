@@ -486,7 +486,7 @@ def main():
     parser.add_argument("--sample", type=int, default=0,
                         help="Print N sample thinking traces instead of writing")
     parser.add_argument("--vendor-dir", default=None,
-                        help="Path to vendor directory (e.g. apis/videoamp) containing "
+                        help="Path to vendor directory (e.g. apis/acme) containing "
                              "thinking_knowledge.yaml. If omitted, generic traces are generated.")
     args = parser.parse_args()
 

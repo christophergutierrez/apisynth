@@ -5,7 +5,7 @@ Generate router classifier training data from all config.yaml files in an APIs d
 For each confirmed variant, generates question phrasings using the same logic as
 run.py but without any API calls. Writes flat (question, route_key) records.
 
-Route key format: "{vendor}/api/{name}"  (e.g. "videoamp/api/programs")
+Route key format: "{vendor}/api/{name}"  (e.g. "acme/api/programs")
 Vendor is read from each config's endpoint.vendor field.
 
 Usage:
