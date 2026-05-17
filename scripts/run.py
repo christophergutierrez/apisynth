@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import get_skip_filter, get_token, humanize, singular, PAGE_SIZES, \
     PYYAML_REQUIRED, FIELD_QUESTION, FIELD_API_CALL, CFG_VARIANTS, CFG_CONFIRMED, \
-    CFG_TARGET_PER_VARIANT
+    CFG_TARGET_PER_VARIANT, extract_schema, infer_intent
 
 try:
     import yaml
@@ -416,6 +416,8 @@ def make_chained_record(cfg: dict, question: str) -> dict:
                 },
             ]
         },
+        "schema": extract_schema(cfg),
+        "intent_category": "chained",
     }
 
 
@@ -423,12 +425,15 @@ def make_chained_record(cfg: dict, question: str) -> dict:
 
 def make_record(cfg: dict, question: str, params: dict) -> dict:
     """Build a standard (non-chained) training record from a confirmed (question, params) pair."""
+    api_call = {
+        "endpoint": f"{cfg['endpoint']['method']} {cfg['endpoint']['path']}",
+        "params": params,
+    }
     return {
         FIELD_QUESTION: question,
-        FIELD_API_CALL: {
-            "endpoint": f"{cfg['endpoint']['method']} {cfg['endpoint']['path']}",
-            "params": params,
-        },
+        FIELD_API_CALL: api_call,
+        "schema": extract_schema(cfg),
+        "intent_category": infer_intent(api_call, cfg.get("path_params") or {}),
     }
 
 

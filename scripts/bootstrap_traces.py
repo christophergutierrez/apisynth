@@ -69,12 +69,13 @@ SYSTEM = (
 # Model inference
 # ---------------------------------------------------------------------------
 
-def call_model(vllm_url: str, model: str, prompt: str, max_tokens: int = 800) -> dict:
+def call_model(vllm_url: str, model: str, prompt: str, max_tokens: int = 800,
+               temperature: float = 0.3) -> dict:
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0,
+        "temperature": temperature,
     }
     req = urllib.request.Request(
         f"{vllm_url}/v1/chat/completions",
@@ -189,12 +190,80 @@ def verify_api_call(api_call: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Deduplication helpers
+# ---------------------------------------------------------------------------
+
+def _cosine_similarity(a: list, b: list) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = sum(x * x for x in a) ** 0.5
+    mag_b = sum(x * x for x in b) ** 0.5
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+def _dedup_by_embedding(
+    candidates: list[dict],
+    output_path: str | None,
+    threshold: float,
+) -> tuple[list[dict], int]:
+    """Remove candidates whose question is near-duplicate of existing training records.
+
+    Embeds all questions using sentence-transformers (all-MiniLM-L6-v2).
+    Compares each candidate against existing output records + already-accepted candidates.
+    Returns (kept_candidates, num_removed).
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        print("Warning: sentence-transformers not installed — skipping dedup. "
+              "Run: pip install sentence-transformers")
+        return candidates, 0
+
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    # Load existing questions from output file
+    existing_questions: list[str] = []
+    if output_path:
+        p = Path(output_path).expanduser()
+        if p.exists():
+            for line in p.read_text().splitlines():
+                if line.strip():
+                    try:
+                        existing_questions.append(json.loads(line).get("question", ""))
+                    except json.JSONDecodeError:
+                        pass
+
+    reference_embeddings = (
+        model.encode(existing_questions).tolist() if existing_questions else []
+    )
+
+    kept: list[dict] = []
+    removed = 0
+    for r in candidates:
+        q = r.get("prompt", "")
+        emb = model.encode([q]).tolist()[0]
+        is_dup = any(
+            _cosine_similarity(emb, ref) >= threshold
+            for ref in reference_embeddings
+        )
+        if is_dup:
+            removed += 1
+        else:
+            kept.append(r)
+            reference_embeddings.append(emb)
+
+    return kept, removed
+
+
+# ---------------------------------------------------------------------------
 # Main bootstrap loop
 # ---------------------------------------------------------------------------
 
-def bootstrap_one(vllm_url: str, model: str, prompt: str, verify: bool) -> dict:
+def bootstrap_one(vllm_url: str, model: str, prompt: str, verify: bool,
+                  temperature: float = 0.3) -> dict:
     try:
-        result = call_model(vllm_url, model, prompt)
+        result = call_model(vllm_url, model, prompt, temperature=temperature)
     except Exception as e:
         return {"prompt": prompt, "ok": False, "error": str(e)}
 
@@ -234,6 +303,11 @@ def main():
     parser.add_argument("--verify",    action="store_true",
                         help="Verify each api_call against the live API (requires cli_verification.yaml)")
     parser.add_argument("--workers",   type=int, default=5)
+    parser.add_argument("--temperature", type=float, default=0.3,
+                        help="Sampling temperature (default: 0.3). Use >0 to prevent trace collapse.")
+    parser.add_argument("--dedup-threshold", type=float, default=0.95,
+                        help="Cosine similarity threshold for deduplication against existing "
+                             "training records (default: 0.95). Set to 1.0 to disable.")
     parser.add_argument("--vendor-dir", default=None,
                         help="Path to vendor directory (e.g. apis/acme) containing "
                              "canonical_prompts.txt and cli_verification.yaml")
@@ -248,16 +322,19 @@ def main():
     else:
         prompts = CANONICAL_PROMPTS
 
-    print(f"Model:   {args.model}")
-    print(f"Server:  {args.vllm_url}")
-    print(f"Prompts: {len(prompts)}")
-    print(f"Verify:  {args.verify}")
+    print(f"Model:       {args.model}")
+    print(f"Server:      {args.vllm_url}")
+    print(f"Prompts:     {len(prompts)}")
+    print(f"Verify:      {args.verify}")
+    print(f"Temperature: {args.temperature}")
+    print(f"Dedup ≥:     {args.dedup_threshold}")
     print()
 
     results = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
-            ex.submit(bootstrap_one, args.vllm_url, args.model, p, args.verify): p
+            ex.submit(bootstrap_one, args.vllm_url, args.model, p, args.verify,
+                      args.temperature): p
             for p in prompts
         }
         for fut in as_completed(futures):
@@ -282,6 +359,16 @@ def main():
         for r in failed:
             print(f"  {r['prompt']!r}: {r.get('error','')}")
 
+    # Dedup against existing training data + already-accepted bootstrap records
+    dedup_candidates = passed
+    deduped_count = 0
+    if args.dedup_threshold < 1.0 and passed:
+        dedup_candidates, deduped_count = _dedup_by_embedding(
+            passed, args.output, args.dedup_threshold
+        )
+        print(f"Dedup: {deduped_count} removed (similarity ≥ {args.dedup_threshold}), "
+              f"{len(dedup_candidates)} kept")
+
     if args.dry_run or not args.output:
         print("\nDry run — no output written.")
         return
@@ -290,7 +377,7 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     written = 0
     with open(out, "a") as f:
-        for r in passed:
+        for r in dedup_candidates:
             record = {
                 FIELD_QUESTION: r["prompt"],
                 FIELD_API_CALL: r[FIELD_API_CALL],
