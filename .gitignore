@@ -9,6 +9,7 @@ apis/
 # ...except videoamp, which is the reference implementation (scripts committed)
 !apis/videoamp/
 !apis/videoamp/**
+handoff/
 
 # Scratch / temporary files
 tmp/
