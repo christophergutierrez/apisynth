@@ -102,6 +102,8 @@ def _evolve_record(record: dict, axis: str) -> dict | None:
 
     try:
         evolved_q = _call_claude(prompt, model)
+        # Strip any trailing "API call:" or JSON the model appended
+        evolved_q = evolved_q.split("\nAPI call:")[0].split("\n```")[0].strip()
     except Exception as e:
         print(f"  Claude error ({axis}): {e}")
         return None

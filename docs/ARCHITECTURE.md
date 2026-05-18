@@ -10,22 +10,29 @@ apisynth is a data generation pipeline. It takes a REST API and produces trainin
 that teaches a language model to translate natural language into API calls.
 
 ```
-config.yaml          ← describes the endpoint (URL, params, auth, targets)
+config.yaml             ← describes the endpoint (URL, params, auth, targets)
     │
     ▼
-sweep.py             ← discovers which param values return real data
+pipeline.py             ← orchestrates all steps below (or run individually)
+    │
+    ├── sweep.py        ← discovers which param values return real data
+    │
+    ├── run.py          ← generates (question, api_call) pairs, validates each via live API
+    │                      each record now includes schema + intent_category fields
+    │
+    ├── add_thinking.py ← enriches each record with a structured reasoning trace
+    │
+    ├── enrich_schema.py← adds schema + intent_category to pre-existing records (no API)
+    │
+    ├── evolve_questions.py ← diversifies question phrasings via LLM mutation (Claude API)
+    │
+    └── gen_router_data + train_router ← trains intent classifier
     │
     ▼
-run.py               ← generates (question, api_call) pairs, validates each via live API
+training.jsonl          ← final supervised fine-tuning dataset
     │
     ▼
-add_thinking.py      ← enriches each record with a structured reasoning trace
-    │
-    ▼
-training.jsonl       ← final supervised fine-tuning dataset
-    │
-    ▼
-(external: trainLLM) ← fine-tunes the LLM on the dataset
+(external: trainLLM)    ← fine-tunes the LLM on the dataset
     │
     ▼
 bootstrap_traces.py  ← runs trained model, verifies outputs, feeds successful traces back
