@@ -13,6 +13,23 @@ Each record pairs a question with the API call that satisfies it:
 
 The training data teaches an LLM *intent → API parameters*, not API responses. The optional `thinking` field contains a structured reasoning trace added by `add_thinking.py`.
 
+## What it does and why
+
+apisynth is an **agentic tool-use data pipeline**. The goal is to produce fine-tuning data that teaches a model to call APIs from natural language — the same problem addressed by Gorilla LLM and ToolBench, but designed to run against any REST API you have access to.
+
+The unifying design principle: **use the live API as the verifier at every stage**. Sweep, run, eval, DPO, and STaR all use real API responses as ground truth rather than human labels or a teacher model. If the API rejects a parameter combination, it never appears in the dataset.
+
+The pipeline implements several established methods:
+
+| Method | Where | What it does |
+|--------|-------|--------------|
+| **SFT with live verification** | `run.py` | Generates (question, api_call) pairs; every record is validated by a real API call before being written |
+| **Chain-of-thought traces** | `add_thinking.py` | Adds structured reasoning traces, but generated *deterministically from the ground-truth answer* — not distilled from a teacher model, so the reasoning is always consistent with the correct call |
+| **STaR** (Zelikman et al. 2022) | `bootstrap_traces.py` | Runs the trained model, keeps outputs the API accepts, feeds them back as new training data — iterative self-improvement using execution as the reward signal |
+| **DPO** (Rafailov et al. 2023) | `gen_dpo.py` | Generates (chosen, rejected) preference pairs using the live API validator as the judge |
+| **Paraphrase augmentation** | `evolve_questions.py` | Uses Claude to rewrite questions along multiple axes (formality, verbosity, synonyms) — same API call, broader surface-form coverage |
+| **Intent routing** | `train_router.py` | Trains a lightweight logistic-regression classifier to route to the right endpoint before the heavier LLM runs |
+
 ## Documentation
 
 | Document | Contents |
