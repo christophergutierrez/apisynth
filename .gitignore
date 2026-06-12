@@ -1,8 +1,10 @@
 # Generated training data and output
 data/
 
-# Vendor-specific API configs (local only — not part of the generic framework)
-apis/
+# Vendor-specific API configs (local only — not part of the generic framework).
+# Note: apis/* (not apis/) so the negations below can re-include specific vendors;
+# git cannot re-include paths under a wholly-excluded directory.
+apis/*
 # ...except the example vendor, which is a template showing what to create
 !apis/example/
 !apis/example/**

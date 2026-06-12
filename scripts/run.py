@@ -439,12 +439,28 @@ def make_record(cfg: dict, question: str, params: dict) -> dict:
 
 # ── Run one question ───────────────────────────────────────────────────────
 
-def run_one(cfg: dict, token: str, output: Path, question: str, params: dict) -> tuple[bool, str]:
+def run_one(cfg: dict, token: str, output: Path, question: str, params: dict,
+            offline: bool = False) -> tuple[bool, str]:
     """Validate one (question, params) pair against the live API and write if successful.
 
     For chained records, validates only the parent list endpoint.
     Returns (success, status_message). Thread-safe: uses _write_lock for file writes.
+
+    In offline mode the live API call is skipped entirely: the record is built and
+    written unconditionally. The result is structurally valid but UNVERIFIED — no
+    API has confirmed the param combination is accepted. Intended for tests, CI,
+    demos, and cheap question-surface regeneration of already-confirmed variants.
     """
+    if offline:
+        if params.get(_CHAINED):
+            record = make_chained_record(cfg, question)
+        else:
+            record = make_record(cfg, question, params)
+        with _write_lock:
+            with open(output, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        return True, f"GEN  (unverified)  {question[:80]}"
+
     if params.get(_CHAINED):
         parent = cfg.get("parent", {})
         req = urllib.request.Request(
@@ -499,6 +515,13 @@ def run_one(cfg: dict, token: str, output: Path, question: str, params: dict) ->
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--offline", action="store_true",
+        help="Skip live API validation; generate records from the config alone. "
+             "Output is structurally valid but UNVERIFIED. Requires variants to be "
+             "pre-confirmed in the config's status section (offline cannot run sweep). "
+             "For path-param/chained endpoints, IDs are read from status, not collected.",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -513,11 +536,18 @@ def main():
     output = _REPO / "data" / vendor / name / "training.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    token = get_token(cfg)
+    token = "" if args.offline else get_token(cfg)
     status = cfg.get("status") or {}
 
+    if args.offline:
+        print("\n" + "=" * 70)
+        print("OFFLINE MODE — records are NOT validated against a live API.")
+        print("Output is structurally valid but UNVERIFIED. Do not treat as")
+        print("execution-verified data. (Live verification is the default.)")
+        print("=" * 70)
+
     parent_cfg = cfg.get("parent")
-    if parent_cfg and cfg.get("path_params"):
+    if not args.offline and parent_cfg and cfg.get("path_params"):
         path_pname = list(cfg["path_params"].keys())[0]
         existing_ids = (status.get(path_pname) or {}).get("valid_values") or []
         if len(existing_ids) < 20:
@@ -598,7 +628,7 @@ def main():
 
     if workers == 1:
         for i, (q, p, _) in enumerate(tasks, 1):
-            ok, msg = run_one(cfg, token, output, q, p)
+            ok, msg = run_one(cfg, token, output, q, p, offline=args.offline)
             print(f"[{i:4d}/{total}] {msg}")
             if ok:
                 passed += 1
@@ -611,7 +641,7 @@ def main():
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             fmap = {
-                ex.submit(run_one, cfg, token, output, q, p): (i, q)
+                ex.submit(run_one, cfg, token, output, q, p, args.offline): (i, q)
                 for i, (q, p, _) in enumerate(tasks, 1)
             }
             for fut in as_completed(fmap):

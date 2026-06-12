@@ -1,0 +1,45 @@
+# Example vendor — by-id + chained endpoint (offline-runnable reference).
+#
+# FICTIONAL API. Demonstrates the two-step "chained" call (list to get an ID,
+# then fetch by that ID) plus single-item by-id lookups. Runs fully offline:
+#
+#   python scripts/run.py --config apis/example/episode/config.yaml --offline
+#
+# In offline mode the path-param IDs below are read from `status` instead of
+# being collected from the parent endpoint over the network.
+
+endpoint:
+  name: episode
+  vendor: example
+  method: GET
+  path: /external/v1/content/episodes/{episodeId}
+  base_url: http://localhost:8899/external/v1/content/episodes/{episodeId}
+
+auth:
+  env_var: EXAMPLE_API_TOKEN
+  cli_fallback: "true"   # never invoked in offline mode
+
+limits:
+  workers: 1
+
+path_params:
+  episodeId:
+    type: integer
+
+# Parent list endpoint — enables the chained two-step record.
+parent:
+  endpoint: GET /external/v1/content/episodes
+  base_url: http://localhost:8899/external/v1/content/episodes
+  id_field: id
+
+training:
+  target_per_variant: 25
+
+status:
+  # Valid IDs for by-id question generation. Normally collected from the parent
+  # endpoint; pre-filled here so the example runs offline.
+  episodeId:
+    valid_values: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
+  variants:
+    - params: {episodeId: 101}   # by-id (drives the by-id loop; IDs come from valid_values)
+      confirmed: true

@@ -1,0 +1,43 @@
+# Example vendor — list endpoint (offline-runnable reference).
+#
+# This is a FICTIONAL API. Its base_url points at localhost and is never
+# contacted in offline mode. Variants are pre-confirmed below so `run.py
+# --offline` can generate data with no sweep and no network:
+#
+#   python scripts/run.py --config apis/example/episodes/config.yaml --offline
+#
+# Exercises bare-list, paginated, and filtered intents.
+
+endpoint:
+  name: episodes
+  vendor: example
+  method: GET
+  path: /external/v1/content/episodes
+  base_url: http://localhost:8899/external/v1/content/episodes
+
+auth:
+  env_var: EXAMPLE_API_TOKEN
+  cli_fallback: "true"   # never invoked in offline mode
+
+limits:
+  workers: 1
+
+params:
+  pageSize:
+    type: integer
+  networkId:
+    type: integer
+    label: network
+    values: [1, 2, 3, 4, 5]
+
+training:
+  target_per_variant: 25
+
+# Pre-confirmed variants — normally written by sweep.py against the live API.
+# Pre-filled here so the example runs fully offline.
+status:
+  variants:
+    - params: {}            # bare-list / paginated
+      confirmed: true
+    - params: {networkId: 3}  # filtered (value is a placeholder; gen pulls from params.values)
+      confirmed: true
