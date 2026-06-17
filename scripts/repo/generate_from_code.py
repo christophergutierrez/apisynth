@@ -120,6 +120,21 @@ def _signature_for(unit: Dict[str, Any]) -> str:
     return f"{name}(...)"
 
 
+def _call_form(unit: Dict[str, Any]) -> str:
+    """Return the INVOCATION form (how you CALL the unit), distinct from its
+    definition signature.
+
+    For ``method`` units this drops the leading ``self``: a bound-method call
+    ``instance.method(...)`` does NOT pass ``self`` explicitly, so embedding the
+    definition signature ``method(self, ...)`` into a call form would teach an
+    invalid usage. All other unit types' definition signatures already reflect
+    how they are called.
+    """
+    if unit["type"] == "method":
+        return f"{unit['name']}(...)"
+    return _signature_for(unit)
+
+
 # ---------------------------------------------------------------------------
 # Thinking trace generators — LINEAR style (Entity/Scope/Use/NOT)
 # ---------------------------------------------------------------------------
@@ -149,15 +164,15 @@ def _linear_method(unit: Dict[str, Any]) -> str:
     file_path = unit["file"]
     lineno = unit.get("lineno")
     cls = unit.get("class") or ""  # guard against None and missing key
-    sig = _signature_for(unit)
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
 
+    call = _call_form(unit)
     if cls:
         entity_line = f"Entity: method {name} on class {cls}"
-        use_line = f"Use: instance.{sig}  # where instance is a {cls}"
+        use_line = f"Use: instance.{call}  # where instance is a {cls}"
     else:
         entity_line = f"Entity: method {name}"
-        use_line = f"Use: instance.{sig}"
+        use_line = f"Use: instance.{call}"
 
     return (
         f"{entity_line}\n"
@@ -254,19 +269,18 @@ def _qoc_method(unit: Dict[str, Any]) -> str:
     file_path = unit["file"]
     lineno = unit.get("lineno")
     cls = unit.get("class") or ""  # guard against None and missing key
-    sig = _signature_for(unit)
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
 
     if cls:
         question_line = f"Question: Should `{name}` be called on a `{cls}` instance or as a standalone function?"
-        option_a = f"Option A: call on an instance — instance.{sig}  where instance is a {cls}"
+        option_a = f"Option A: call on an instance — instance.{_call_form(unit)}  where instance is a {cls}"
         criteria = (
             f"Criteria: `{name}` is an instance method of `{cls}` at {location}. "
             f"An instance of `{cls}` must exist before calling. Option A wins."
         )
     else:
         question_line = f"Question: Should `{name}` be called on an instance or as a standalone function?"
-        option_a = f"Option A: call on an instance — instance.{sig}"
+        option_a = f"Option A: call on an instance — instance.{_call_form(unit)}"
         criteria = (
             f"Criteria: `{name}` is an instance method at {location}. "
             f"An instance of the owning class must exist before calling. Option A wins."
@@ -307,7 +321,7 @@ def _qoc_api_call(unit: Dict[str, Any]) -> str:
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     return (
         f"Question: Is `{name}` a real HTTP/API call or a plain data-structure operation?\n"
-        f"Option A: real HTTP/API call — {sig}  (network request, may raise on HTTP errors)\n"
+        f"Option A: real HTTP/API call — {sig}  (network request — may return an error response or raise transport/client exceptions)\n"
         f"Option B: plain dict.get() or queue.get()  (local, no network)\n"
         f"Criteria: `{name}` is an API call site at {location}. "
         f"It performs an actual HTTP/API request. Option A wins.\n"
@@ -406,15 +420,15 @@ def _pattern_call_helper(unit: Dict[str, Any]) -> str:
     file_path = unit["file"]
     lineno = unit.get("lineno")
     cls = unit.get("class") or ""  # guard against None and missing key
-    sig = _signature_for(unit)
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
 
+    call = _call_form(unit)
     if cls:
         helper_line = f"Helper: {name} — internal helper method on {cls} at {location}"
-        call_line = f"Call: instance.{sig}  # where instance is a {cls}"
+        call_line = f"Call: instance.{call}  # where instance is a {cls}"
     else:
         helper_line = f"Helper: {name} — internal {unit_type} at {location}"
-        call_line = f"Call: {sig}"
+        call_line = f"Call: {call}"
 
     return (
         f"{helper_line}\n"

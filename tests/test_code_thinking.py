@@ -745,3 +745,56 @@ class TestPatternNotInDefaultPipeline:
                     f"Pattern marker {marker!r} found in hybrid pipeline thinking trace "
                     f"(should only appear via generate_pattern_thinking):\n{thinking}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Call-form correctness (external review — Codex finding #1)
+#
+# A bound-method CALL does not pass `self`: it is `instance.m(...)`, never
+# `instance.m(self, ...)`. The traces must teach the valid call form. The
+# DEFINITION signature in output.signature legitimately keeps `self`.
+# ---------------------------------------------------------------------------
+
+class TestMethodCallFormNoSelf:
+    _METHOD = _make_unit("method", "do_thing", file="pkg/m.py", **{"class": "Widget"})
+    # Classless method: no 'class' key at all.
+    _ORPHAN = {"type": "method", "name": "do_thing", "file": "pkg/m.py", "lineno": 1}
+
+    @pytest.mark.parametrize("unit", [_METHOD, _ORPHAN], ids=["with-class", "classless"])
+    @pytest.mark.parametrize("style", ["linear", "qoc"])
+    def test_style_call_form_drops_self(self, unit, style):
+        thinking = _make_thinking(unit, style=style)
+        assert "(self" not in thinking, (
+            f"{style} method trace teaches an invalid bound-method call form:\n{thinking}"
+        )
+        assert "do_thing(...)" in thinking  # the no-self call form is present
+
+    @pytest.mark.parametrize("unit", [_METHOD, _ORPHAN], ids=["with-class", "classless"])
+    def test_call_helper_pattern_drops_self(self, unit):
+        thinking = generate_pattern_thinking(unit, "call_helper")
+        assert "(self" not in thinking, (
+            f"call_helper pattern teaches an invalid bound-method call form:\n{thinking}"
+        )
+        assert "do_thing(...)" in thinking
+
+    def test_definition_signature_keeps_self(self):
+        """output.signature reflects the DEFINITION, which includes self."""
+        from scripts.repo.generate_from_code import _make_record, _signature_for
+        assert _signature_for(self._METHOD) == "do_thing(self, ...)"
+        rec = _make_record(self._METHOD)
+        assert rec["output"]["signature"] == "do_thing(self, ...)"
+
+
+# ---------------------------------------------------------------------------
+# API-call error-behavior wording (external review — Codex finding #2)
+# requests/httpx do NOT raise on 4xx/5xx by default; the trace must not claim
+# the call "may raise on HTTP errors".
+# ---------------------------------------------------------------------------
+
+class TestApiCallErrorWording:
+    _API = _make_unit("api_call", "requests.get", file="pkg/api.py")
+
+    @pytest.mark.parametrize("style", ["linear", "qoc"])
+    def test_no_overstated_http_raise(self, style):
+        thinking = _make_thinking(self._API, style=style)
+        assert "may raise on HTTP errors" not in thinking
