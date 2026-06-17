@@ -8,7 +8,7 @@ holdout.jsonl files under data/repos/<repo-name>/.
 Each record carries:
   - type: "code"
   - question: templated natural-language prompt keyed off unit type
-  - thinking: deterministic Entity/Scope/Use/… reasoning trace
+  - thinking: deterministic Entity/Scope/Use/… reasoning trace (or QOC)
   - output: structured code-unit descriptor (unit, name, file, [class], [signature])
 
 The train/holdout split is deterministic: each unit's SHA-256 hash of
@@ -17,6 +17,10 @@ The train/holdout split is deterministic: each unit's SHA-256 hash of
 holdout_ratio. Because SHA-256 is process-independent (unlike the builtin
 salted hash()), the same input always produces the same split across runs and
 processes — no random seed required. See _split_records() / _in_holdout().
+
+Thinking style mapping (used when generate_from_code style=None):
+  config.thinking_style == "deterministic"  →  "linear"  (default)
+  config.thinking_style == "hybrid"         →  "qoc"
 
 Usage:
     python scripts/repo/generate_from_code.py <path/to/repo.yaml>
@@ -29,7 +33,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure the repo root is on sys.path so that `scripts.*` imports work
 # regardless of the working directory when this file is executed directly.
@@ -91,7 +95,7 @@ def _pick_question(unit: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Thinking trace generators (deterministic, Entity/Scope/Use/NOT style)
+# Signature helper
 # ---------------------------------------------------------------------------
 
 def _signature_for(unit: Dict[str, Any]) -> str:
@@ -116,63 +120,260 @@ def _signature_for(unit: Dict[str, Any]) -> str:
     return f"{name}(...)"
 
 
-def _make_thinking(unit: Dict[str, Any]) -> str:
-    """Return a deterministic thinking trace for the unit (Entity/Scope/Use/NOT style)."""
+# ---------------------------------------------------------------------------
+# Thinking trace generators — LINEAR style (Entity/Scope/Use/NOT)
+# ---------------------------------------------------------------------------
+
+def _linear_function(unit: Dict[str, Any]) -> str:
+    """Linear trace for a top-level function unit."""
     name = unit["name"]
-    unit_type = unit["type"]
     file_path = unit["file"]
-    cls = unit.get("class", "")
+    lineno = unit.get("lineno")
     sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+    return (
+        f"Entity: function {name}\n"
+        f"File: {location}\n"
+        f"Scope: single unit — top-level function\n"
+        f"Use: call {sig}\n"
+        f"Params: see function signature in {file_path}"
+    )
 
+
+def _linear_method(unit: Dict[str, Any]) -> str:
+    """Linear trace for a method unit.
+
+    Classless method units (no 'class' key) must NOT emit the literal 'None'.
+    """
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    cls = unit.get("class") or ""  # guard against None and missing key
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+
+    if cls:
+        entity_line = f"Entity: method {name} on class {cls}"
+        use_line = f"Use: instance.{sig}  # where instance is a {cls}"
+    else:
+        entity_line = f"Entity: method {name}"
+        use_line = f"Use: instance.{sig}"
+
+    return (
+        f"{entity_line}\n"
+        f"File: {location}\n"
+        f"Scope: single unit — instance method\n"
+        f"{use_line}\n"
+        f"NOT: calling {name}() as a standalone function"
+    )
+
+
+def _linear_class(unit: Dict[str, Any]) -> str:
+    """Linear trace for a class unit."""
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+    return (
+        f"Entity: class {name}\n"
+        f"File: {location}\n"
+        f"Scope: single unit — class definition\n"
+        f"Use: instantiate with {sig}\n"
+        f"Params: see __init__ in {file_path}"
+    )
+
+
+def _linear_api_call(unit: Dict[str, Any]) -> str:
+    """Linear trace for an api_call unit."""
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+    return (
+        f"Entity: api_call {name}\n"
+        f"File: {location}\n"
+        f"Scope: single call site — HTTP/API invocation\n"
+        f"Use: {sig}\n"
+        f"NOT: a plain dict.get() or queue.get() — this is an HTTP/API call"
+    )
+
+
+def _make_thinking_linear(unit: Dict[str, Any]) -> str:
+    """Dispatch to the appropriate linear-style per-type helper."""
+    unit_type = unit["type"]
     if unit_type == "function":
-        return (
-            f"Entity: function {name}\n"
-            f"File: {file_path}\n"
-            f"Scope: single unit — top-level function\n"
-            f"Use: call {sig}\n"
-            f"Params: see function signature in {file_path}"
-        )
-
+        return _linear_function(unit)
     if unit_type == "method":
-        return (
-            f"Entity: method {name} on class {cls}\n"
-            f"File: {file_path}\n"
-            f"Scope: single unit — instance method\n"
-            f"Use: instance.{sig}\n"
-            f"NOT: calling {name}() as a standalone function"
-        )
-
+        return _linear_method(unit)
     if unit_type == "class":
-        return (
-            f"Entity: class {name}\n"
-            f"File: {file_path}\n"
-            f"Scope: single unit — class definition\n"
-            f"Use: instantiate with {sig}\n"
-            f"Params: see __init__ in {file_path}"
-        )
-
+        return _linear_class(unit)
     if unit_type == "api_call":
-        return (
-            f"Entity: api_call {name}\n"
-            f"File: {file_path}\n"
-            f"Scope: single call site — HTTP/API invocation\n"
-            f"Use: {sig}\n"
-            f"NOT: a plain dict.get() or queue.get() — this is an HTTP/API call"
-        )
-
+        return _linear_api_call(unit)
     # Fallback (should not occur with known scanner types)
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
     return (
         f"Entity: {unit_type} {name}\n"
-        f"File: {file_path}\n"
+        f"File: {location}\n"
         f"Scope: single unit"
     )
+
+
+# ---------------------------------------------------------------------------
+# Thinking trace generators — QOC style (Question/Option/Criteria)
+# Adapted for code units, mirroring add_thinking.py's _qoc_* generators.
+# ---------------------------------------------------------------------------
+
+def _qoc_function(unit: Dict[str, Any]) -> str:
+    """QOC trace for a top-level function unit."""
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+    return (
+        f"Question: How should `{name}` be invoked — as a direct call or via an object?\n"
+        f"Option A: call directly — {sig}  (top-level function, no instance needed)\n"
+        f"Option B: call on an instance — would only apply if it were a method\n"
+        f"Criteria: `{name}` is a top-level function at {location}. "
+        f"No instance required. Option A wins.\n"
+        f"Use: {sig}"
+    )
+
+
+def _qoc_method(unit: Dict[str, Any]) -> str:
+    """QOC trace for a method unit.
+
+    Classless method units (no 'class' key) must NOT emit the literal 'None'.
+    """
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    cls = unit.get("class") or ""  # guard against None and missing key
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+
+    if cls:
+        question_line = f"Question: Should `{name}` be called on a `{cls}` instance or as a standalone function?"
+        option_a = f"Option A: call on an instance — instance.{sig}  where instance is a {cls}"
+        criteria = (
+            f"Criteria: `{name}` is an instance method of `{cls}` at {location}. "
+            f"An instance of `{cls}` must exist before calling. Option A wins."
+        )
+    else:
+        question_line = f"Question: Should `{name}` be called on an instance or as a standalone function?"
+        option_a = f"Option A: call on an instance — instance.{sig}"
+        criteria = (
+            f"Criteria: `{name}` is an instance method at {location}. "
+            f"An instance of the owning class must exist before calling. Option A wins."
+        )
+
+    return (
+        f"{question_line}\n"
+        f"{option_a}\n"
+        f"Option B: call as a standalone function — {name}(...)  (incorrect — not a top-level function)\n"
+        f"{criteria}\n"
+        f"NOT: {name}() as a standalone function"
+    )
+
+
+def _qoc_class(unit: Dict[str, Any]) -> str:
+    """QOC trace for a class unit."""
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+    return (
+        f"Question: Should `{name}` be instantiated or referenced as a type?\n"
+        f"Option A: instantiate — {sig}  (creates a new {name} object)\n"
+        f"Option B: reference the type — {name}  (use as a class object, e.g. for isinstance checks)\n"
+        f"Criteria: `{name}` is a class defined at {location}. "
+        f"For object creation, Option A wins. For type introspection, Option B applies.\n"
+        f"Use: {sig}  (default — create an instance)"
+    )
+
+
+def _qoc_api_call(unit: Dict[str, Any]) -> str:
+    """QOC trace for an api_call unit."""
+    name = unit["name"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+    return (
+        f"Question: Is `{name}` a real HTTP/API call or a plain data-structure operation?\n"
+        f"Option A: real HTTP/API call — {sig}  (network request, may raise on HTTP errors)\n"
+        f"Option B: plain dict.get() or queue.get()  (local, no network)\n"
+        f"Criteria: `{name}` is an API call site at {location}. "
+        f"It performs an actual HTTP/API request. Option A wins.\n"
+        f"NOT: a plain dict.get() or queue.get() — this is an HTTP/API call"
+    )
+
+
+def _make_thinking_qoc(unit: Dict[str, Any]) -> str:
+    """Dispatch to the appropriate QOC-style per-type helper."""
+    unit_type = unit["type"]
+    if unit_type == "function":
+        return _qoc_function(unit)
+    if unit_type == "method":
+        return _qoc_method(unit)
+    if unit_type == "class":
+        return _qoc_class(unit)
+    if unit_type == "api_call":
+        return _qoc_api_call(unit)
+    # Fallback
+    return _make_thinking_linear(unit)
+
+
+# ---------------------------------------------------------------------------
+# Public thinking dispatcher
+# ---------------------------------------------------------------------------
+
+def generate_code_thinking(unit: Dict[str, Any], style: str = "linear") -> str:
+    """Return a deterministic thinking trace for the given code unit.
+
+    Args:
+        unit:  A scanner unit dict with at minimum 'type', 'name', 'file'.
+        style: Trace style — 'linear' (Entity/Scope/Use/NOT) or 'qoc'
+               (Question/Option/Criteria). Unknown values fall back to 'linear'.
+
+    Returns:
+        A multi-line string suitable for the 'thinking' field of a training record.
+    """
+    if style == "qoc":
+        return _make_thinking_qoc(unit)
+    # 'linear' is the default; any unknown style also falls back here.
+    return _make_thinking_linear(unit)
+
+
+# Keep the original name as an internal alias for backward compatibility with
+# existing direct test imports that call _make_thinking(unit) with one argument.
+def _make_thinking(unit: Dict[str, Any], style: str = "linear") -> str:
+    """Return a deterministic thinking trace (backward-compatible wrapper)."""
+    return generate_code_thinking(unit, style=style)
+
+
+def _style_from_config(config) -> str:
+    """Map config.thinking_style to a trace style. Single source of truth.
+
+    "hybrid"        → "qoc"
+    "deterministic" → "linear"  (and anything else / missing → "linear")
+    """
+    if getattr(config, "thinking_style", "deterministic") == "hybrid":
+        return "qoc"
+    return "linear"
 
 
 # ---------------------------------------------------------------------------
 # Record construction
 # ---------------------------------------------------------------------------
 
-def _make_record(unit: Dict[str, Any]) -> Dict[str, Any]:
+def _make_record(unit: Dict[str, Any], style: str = "linear") -> Dict[str, Any]:
     """Convert a scanner unit into a training record."""
     output: Dict[str, Any] = {
         "unit": unit["type"],
@@ -187,7 +388,7 @@ def _make_record(unit: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "type": "code",
         "question": _pick_question(unit),
-        "thinking": _make_thinking(unit),
+        "thinking": _make_thinking(unit, style=style),
         "output": output,
     }
 
@@ -212,14 +413,18 @@ def _in_holdout(unit: Dict[str, Any], holdout_ratio: float) -> bool:
 
 
 def _split_records(
-    units: List[Dict[str, Any]], holdout_ratio: float
+    units: List[Dict[str, Any]], holdout_ratio: float, style: str = "linear"
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Partition units into (train, holdout) records deterministically."""
+    """Partition units into (train, holdout) records deterministically.
+
+    The `style` arg ("linear" default, or "qoc") is threaded into _make_record
+    so the production path (main()/generate_from_repo) honors thinking_style.
+    """
     train_records: List[Dict[str, Any]] = []
     holdout_records: List[Dict[str, Any]] = []
 
     for unit in units:
-        record = _make_record(unit)
+        record = _make_record(unit, style=style)
         if _in_holdout(unit, holdout_ratio):
             holdout_records.append(record)
         else:
@@ -270,18 +475,29 @@ def _cap_units(units: List[Dict[str, Any]], target_records: int) -> List[Dict[st
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_from_code(config, units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def generate_from_code(
+    config, units: List[Dict[str, Any]], style: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """Generate training records from pre-scanned code units.
 
     Args:
-        config: A RepoConfig instance (used for holdout_ratio).
+        config: A RepoConfig instance (used for holdout_ratio and thinking_style).
         units:  List of unit dicts from scan_repo().
+        style:  Thinking trace style — 'linear' or 'qoc'. When None (default),
+                the style is derived from config.thinking_style via
+                _style_from_config (the single source of truth):
+                  "deterministic" → "linear"  (the default)
+                  "hybrid"        → "qoc"
 
     Returns:
         All records (train + holdout combined) as a list of dicts.
         Call _split_records() separately if you need the partition.
     """
-    records = [_make_record(unit) for unit in units]
+    # Resolve style from config when not explicitly supplied (single source of truth).
+    if style is None:
+        style = _style_from_config(config)
+
+    records = [_make_record(unit, style=style) for unit in units]
     return records
 
 
@@ -290,14 +506,16 @@ def generate_from_repo(config) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
 
     This is the thin all-in-one wrapper: it calls scan_repo internally,
     filters by extraction_units (#2), caps to target_records (#3), then
-    partitions the resulting records.
+    partitions the resulting records. The thinking style is derived from
+    config.thinking_style so the production path honors "hybrid" → QOC.
     """
     from scripts.repo.scan_repo import scan_repo  # local import to keep module testable
 
     units = scan_repo(config)
     units = _filter_units_by_config(units, config)
     units = _cap_units(units, config.target_records)
-    return _split_records(units, config.holdout_ratio)
+    style = _style_from_config(config)
+    return _split_records(units, config.holdout_ratio, style=style)
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +599,14 @@ def main() -> None:
     units = _cap_units(units, config.target_records)
     print(f"  After filter/cap: {len(units)} units")
 
-    train_records, holdout_records = _split_records(units, config.holdout_ratio)
+    # Derive trace style from config so written records honor thinking_style.
+    style = _style_from_config(config)
+    train_records, holdout_records = _split_records(
+        units, config.holdout_ratio, style=style
+    )
     print(
         f"  Split: {len(train_records)} train / {len(holdout_records)} holdout "
-        f"(ratio={config.holdout_ratio})"
+        f"(ratio={config.holdout_ratio}, style={style})"
     )
 
     if args.dry_run:
