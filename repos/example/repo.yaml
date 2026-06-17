@@ -1,0 +1,9 @@
+repo:
+  name: example-repo
+  path: ../../tests/fixtures/sample_repo
+  include:
+    - "**/*.py"
+extraction:
+  units:
+    - functions
+    - classes
