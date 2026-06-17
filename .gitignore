@@ -12,6 +12,10 @@ apis/*
 !apis/videoamp/
 !apis/videoamp/**
 handoff/
+.fastembed_cache/
+.hermes/
+HANDOFF.md
+
 
 # Scratch / temporary files
 tmp/
