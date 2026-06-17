@@ -358,6 +358,137 @@ def _make_thinking(unit: Dict[str, Any], style: str = "linear") -> str:
     return generate_code_thinking(unit, style=style)
 
 
+# ---------------------------------------------------------------------------
+# Pattern template generators (Milestone 2.2)
+#
+# Each function takes a unit dict and returns a deterministic multi-line trace
+# keyed to a specific code-task pattern ("implement", "call_helper", "refactor").
+# These are standalone opt-in generators. They are NOT wired into the default
+# pipeline (generate_from_repo / main) — that wiring is deferred to a later phase.
+# ---------------------------------------------------------------------------
+
+def _pattern_implement(unit: Dict[str, Any]) -> str:
+    """Structured reasoning trace for the 'implement' pattern.
+
+    Covers: scope of the work, target file:lineno, signature, what to write.
+    """
+    name = unit["name"]
+    unit_type = unit["type"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    cls = unit.get("class") or ""  # guard against None and missing key
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+
+    if cls:
+        scope_line = f"Scope: implement {unit_type} {name} on class {cls}"
+    else:
+        scope_line = f"Scope: implement {unit_type} {name}"
+
+    return (
+        f"Implement: {name}\n"
+        f"Target: {location}\n"
+        f"{scope_line}\n"
+        f"Signature: {sig}\n"
+        f"Write: body of {name} at {location} — do not alter surrounding code\n"
+        f"NOT: modifying callers or existing tests — scope is this unit only"
+    )
+
+
+def _pattern_call_helper(unit: Dict[str, Any]) -> str:
+    """Structured reasoning trace for the 'call_helper' pattern.
+
+    Covers: the call form, where the helper lives, disambiguation that it is
+    an internal helper (not a public API).
+    """
+    name = unit["name"]
+    unit_type = unit["type"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    cls = unit.get("class") or ""  # guard against None and missing key
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+
+    if cls:
+        helper_line = f"Helper: {name} — internal helper method on {cls} at {location}"
+        call_line = f"Call: instance.{sig}  # where instance is a {cls}"
+    else:
+        helper_line = f"Helper: {name} — internal {unit_type} at {location}"
+        call_line = f"Call: {sig}"
+
+    return (
+        f"{helper_line}\n"
+        f"{call_line}\n"
+        f"Scope: single call site — invoke {name} from within the same module\n"
+        f"NOT: a public API endpoint — this is an internal helper, not exposed externally\n"
+        f"NOT: reimplementing {name} — just call it"
+    )
+
+
+def _pattern_refactor(unit: Dict[str, Any]) -> str:
+    """Structured reasoning trace for the 'refactor' pattern.
+
+    Covers: identify the unit at file:lineno, preserve behavior/signature,
+    scope of the change.
+    """
+    name = unit["name"]
+    unit_type = unit["type"]
+    file_path = unit["file"]
+    lineno = unit.get("lineno")
+    cls = unit.get("class") or ""  # guard against None and missing key
+    sig = _signature_for(unit)
+    location = f"{file_path}:{lineno}" if lineno is not None else file_path
+
+    if cls:
+        target_line = f"Target: {unit_type} {name} on class {cls} at {location}"
+    else:
+        target_line = f"Target: {unit_type} {name} at {location}"
+
+    return (
+        f"Refactor: {name}\n"
+        f"{target_line}\n"
+        f"Preserve: external behavior — callers must not require changes\n"
+        f"Preserve: signature {sig} — do not alter the public interface\n"
+        f"Scope: internals of {name} only — do not change callers or tests\n"
+        f"NOT: adding new features or changing observable behavior"
+    )
+
+
+# Registry of all pattern template generators.
+_PATTERN_TEMPLATES: Dict[str, Any] = {
+    "implement": _pattern_implement,
+    "call_helper": _pattern_call_helper,
+    "refactor": _pattern_refactor,
+}
+
+
+def generate_pattern_thinking(unit: Dict[str, Any], pattern: str) -> str:
+    """Return a deterministic thinking trace for the given code unit and pattern.
+
+    Pattern templates are explicit opt-in generators keyed by pattern name.
+    Unlike ``generate_code_thinking``, an unknown pattern raises ``ValueError``
+    (rather than silently falling back) because each pattern carries a distinct
+    reasoning structure and guessing the wrong one would produce misleading traces.
+
+    Args:
+        unit:    A scanner unit dict with at minimum 'type', 'name', 'file'.
+        pattern: One of the known pattern names: 'implement', 'call_helper',
+                 'refactor'. Any other value raises ValueError.
+
+    Returns:
+        A multi-line string suitable for the 'thinking' field of a training record.
+
+    Raises:
+        ValueError: If ``pattern`` is not a recognised pattern name.
+    """
+    if pattern not in _PATTERN_TEMPLATES:
+        valid = ", ".join(sorted(_PATTERN_TEMPLATES))
+        raise ValueError(
+            f"Unknown pattern {pattern!r}. Valid patterns are: {valid}"
+        )
+    return _PATTERN_TEMPLATES[pattern](unit)
+
+
 def _style_from_config(config) -> str:
     """Map config.thinking_style to a trace style. Single source of truth.
 

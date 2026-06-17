@@ -25,6 +25,7 @@ from scripts.repo.generate_from_code import (
     generate_code_thinking,
     generate_from_code,
     generate_from_repo,
+    generate_pattern_thinking,
     _make_thinking,
     _make_record,
     _split_records,
@@ -530,3 +531,217 @@ def test_cli_hybrid_writes_qoc_to_disk(tmp_path):
         assert "Question:" in rec["thinking"], (
             f"CLI hybrid run wrote a non-QOC trace to disk: {rec['thinking']}"
         )
+
+
+# ===========================================================================
+# Milestone 2.2 — Pattern template tests
+# ===========================================================================
+
+_PATTERNS = ("implement", "call_helper", "refactor")
+
+# Structural markers expected in each pattern's output.
+_PATTERN_MARKERS: dict[str, list[str]] = {
+    "implement": ["Implement", "Scope:"],
+    "call_helper": ["Helper", "Call:"],
+    "refactor": ["Refactor", "Preserve"],
+}
+
+
+# ---------------------------------------------------------------------------
+# Non-empty traces for each pattern × each unit type
+# ---------------------------------------------------------------------------
+
+class TestPatternNonEmpty:
+    @pytest.mark.parametrize("pattern", _PATTERNS)
+    @pytest.mark.parametrize("unit", _ALL_UNIT_TYPES, ids=lambda u: u["type"])
+    def test_pattern_nonempty(self, unit, pattern):
+        trace = generate_pattern_thinking(unit, pattern)
+        assert trace, f"Pattern {pattern!r} produced empty trace for {unit['type']}"
+
+    @pytest.mark.parametrize("pattern", _PATTERNS)
+    @pytest.mark.parametrize("unit", _ALL_UNIT_TYPES, ids=lambda u: u["type"])
+    def test_pattern_contains_unit_name(self, unit, pattern):
+        trace = generate_pattern_thinking(unit, pattern)
+        assert unit["name"] in trace, (
+            f"Unit name {unit['name']!r} missing from pattern={pattern!r} "
+            f"trace for {unit['type']}:\n{trace}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Same-process determinism for each pattern × each unit type
+# ---------------------------------------------------------------------------
+
+class TestPatternDeterminism:
+    @pytest.mark.parametrize("pattern", _PATTERNS)
+    @pytest.mark.parametrize("unit", _ALL_UNIT_TYPES, ids=lambda u: u["type"])
+    def test_pattern_same_process_deterministic(self, unit, pattern):
+        t1 = generate_pattern_thinking(unit, pattern)
+        t2 = generate_pattern_thinking(unit, pattern)
+        assert t1 == t2, (
+            f"Pattern {pattern!r} trace is not deterministic for {unit['type']}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Structural markers present for each pattern
+# ---------------------------------------------------------------------------
+
+class TestPatternStructuralMarkers:
+    @pytest.mark.parametrize("pattern", _PATTERNS)
+    @pytest.mark.parametrize("unit", _ALL_UNIT_TYPES, ids=lambda u: u["type"])
+    def test_pattern_has_markers(self, unit, pattern):
+        trace = generate_pattern_thinking(unit, pattern)
+        for marker in _PATTERN_MARKERS[pattern]:
+            assert marker in trace, (
+                f"Marker {marker!r} missing from pattern={pattern!r} trace "
+                f"for {unit['type']}:\n{trace}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# ValueError for unknown pattern
+# ---------------------------------------------------------------------------
+
+class TestPatternValueError:
+    def test_bogus_pattern_raises_value_error(self):
+        unit = _make_unit("function", "my_func", file="a.py")
+        with pytest.raises(ValueError) as exc_info:
+            generate_pattern_thinking(unit, "bogus")
+        msg = str(exc_info.value)
+        # The error message must name the valid patterns.
+        for valid in ("implement", "call_helper", "refactor"):
+            assert valid in msg, (
+                f"Valid pattern {valid!r} not mentioned in ValueError message: {msg!r}"
+            )
+
+    def test_empty_pattern_raises_value_error(self):
+        unit = _make_unit("function", "my_func", file="a.py")
+        with pytest.raises(ValueError):
+            generate_pattern_thinking(unit, "")
+
+
+# ---------------------------------------------------------------------------
+# Classless method under each pattern must not emit literal "None"
+# ---------------------------------------------------------------------------
+
+class TestPatternClasslessMethod:
+    def _classless_unit(self):
+        return {"type": "method", "name": "orphan_method", "file": "a.py", "lineno": 5}
+
+    @pytest.mark.parametrize("pattern", _PATTERNS)
+    def test_classless_no_none(self, pattern):
+        unit = self._classless_unit()
+        trace = generate_pattern_thinking(unit, pattern)
+        assert "None" not in trace, (
+            f"Literal 'None' found in pattern={pattern!r} trace for classless method:\n{trace}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cross-process determinism for the 'implement' pattern (PYTHONHASHSEED-invariant)
+# ---------------------------------------------------------------------------
+
+_PATTERN_CROSS_PROCESS_SCRIPT = textwrap.dedent(
+    """
+    import json, sys
+    sys.path.insert(0, {repo_root!r})
+    from scripts.repo.generate_from_code import generate_pattern_thinking
+
+    units = [
+        {{"type": "function",  "name": "func_a",      "file": "pkg/a.py", "lineno": 1}},
+        {{"type": "method",    "name": "meth_b",      "file": "pkg/b.py", "lineno": 2, "class": "B"}},
+        {{"type": "class",     "name": "ClassC",      "file": "pkg/c.py", "lineno": 3}},
+        {{"type": "api_call",  "name": "requests.get","file": "pkg/d.py", "lineno": 4}},
+        # Classless method — must not emit 'None'
+        {{"type": "method",    "name": "orphan",      "file": "pkg/e.py", "lineno": 5}},
+    ]
+
+    traces = [generate_pattern_thinking(u, "implement") for u in units]
+    print(json.dumps(traces))
+    """
+)
+
+
+def _run_pattern_cross_process(hashseed: int):
+    """Run the pattern cross-process script with a specific PYTHONHASHSEED."""
+    repo_root = str(_REPO_ROOT)
+    script = _PATTERN_CROSS_PROCESS_SCRIPT.format(repo_root=repo_root)
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = str(hashseed)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, (
+        f"Pattern cross-process subprocess failed (PYTHONHASHSEED={hashseed}):\n{result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def test_pattern_implement_cross_process_deterministic():
+    """'implement' pattern traces must be identical under different PYTHONHASHSEED values."""
+    traces_seed0 = _run_pattern_cross_process(0)
+    traces_seed1 = _run_pattern_cross_process(1)
+    assert traces_seed0 == traces_seed1, (
+        "Pattern 'implement' traces differ between PYTHONHASHSEED=0 and PYTHONHASHSEED=1 — "
+        "a non-stable hash is being used."
+    )
+
+
+def test_pattern_cross_process_no_none_in_classless():
+    """'implement' classless-method trace must not contain 'None' even across processes."""
+    traces = _run_pattern_cross_process(42)
+    # Last entry in the script is the classless 'orphan' method
+    orphan_trace = traces[-1]
+    assert "None" not in orphan_trace, (
+        f"Literal 'None' found in cross-process 'implement' classless trace:\n{orphan_trace}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Guard: default pipeline does NOT emit pattern-only markers
+# ---------------------------------------------------------------------------
+
+class TestPatternNotInDefaultPipeline:
+    """Patterns must NOT appear in generate_from_repo / generate_from_code output.
+
+    Pattern templates are opt-in only. The default pipeline produces linear/qoc
+    traces keyed by thinking_style, not by task pattern.  These guards detect
+    accidental wiring.
+    """
+
+    # Markers that are unique to pattern templates (not present in linear/qoc traces).
+    _PATTERN_ONLY_MARKERS = [
+        "Implement:",   # _pattern_implement header line
+        "Refactor:",    # _pattern_refactor header line
+        "Helper:",      # _pattern_call_helper header line
+    ]
+
+    def test_default_pipeline_no_pattern_markers(self):
+        """generate_from_code with default config must not contain pattern markers."""
+        config = _make_config(thinking_style="deterministic")
+        units = [u.copy() for u in _ALL_UNIT_TYPES]
+        records = generate_from_code(config, units)
+        for rec in records:
+            thinking = rec["thinking"]
+            for marker in self._PATTERN_ONLY_MARKERS:
+                assert marker not in thinking, (
+                    f"Pattern marker {marker!r} found in default pipeline thinking trace "
+                    f"(should only appear via generate_pattern_thinking):\n{thinking}"
+                )
+
+    def test_hybrid_pipeline_no_pattern_markers(self):
+        """generate_from_code with hybrid config (QOC) must not contain pattern markers."""
+        config = _make_config(thinking_style="hybrid")
+        units = [u.copy() for u in _ALL_UNIT_TYPES]
+        records = generate_from_code(config, units)
+        for rec in records:
+            thinking = rec["thinking"]
+            for marker in self._PATTERN_ONLY_MARKERS:
+                assert marker not in thinking, (
+                    f"Pattern marker {marker!r} found in hybrid pipeline thinking trace "
+                    f"(should only appear via generate_pattern_thinking):\n{thinking}"
+                )
