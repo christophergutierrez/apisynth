@@ -131,6 +131,56 @@ def _method_kind(node) -> str | None:
     return None
 
 
+def _is_stub_body(node) -> bool:
+    """Return True when a function/method body is a stub.
+
+    A stub body is one that, after stripping a leading docstring statement,
+    is empty OR consists solely of:
+      - ``pass`` statements
+      - Ellipsis expressions (``...``)
+      - ``raise NotImplementedError`` or ``raise NotImplementedError(...)``
+
+    The leading docstring statement (if present) is an ``ast.Expr`` whose
+    ``.value`` is an ``ast.Constant`` with a ``str`` value.
+    """
+    body = list(node.body)
+    # Strip leading docstring.
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+
+    if not body:
+        return True
+
+    for stmt in body:
+        if isinstance(stmt, ast.Pass):
+            continue
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and stmt.value.value is ...
+        ):
+            continue
+        if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+            exc = stmt.exc
+            if isinstance(exc, ast.Name) and exc.id == "NotImplementedError":
+                continue
+            if (
+                isinstance(exc, ast.Call)
+                and isinstance(exc.func, ast.Name)
+                and exc.func.id == "NotImplementedError"
+            ):
+                continue
+        # Any other statement → not a stub.
+        return False
+
+    return True
+
+
 def _docstring_summary(node):
     """First non-empty line of the node's docstring (<=200 chars), or None."""
     raw = ast.get_docstring(node, clean=True)
@@ -263,6 +313,10 @@ def _extract_units(tree: ast.AST, rel_str: str) -> List[Dict[str, Any]]:
                 kind = _method_kind(node)
                 if kind is not None:
                     unit["method_kind"] = kind
+                # Additive: only set is_stub when the body qualifies as a stub;
+                # non-stub units carry no 'is_stub' key.
+                if _is_stub_body(node):
+                    unit["is_stub"] = True
                 units.append(unit)
             else:
                 unit = {
@@ -278,6 +332,10 @@ def _extract_units(tree: ast.AST, rel_str: str) -> List[Dict[str, Any]]:
                     unit["signature"] = _render_signature(node)
                 except Exception:
                     pass
+                # Additive: only set is_stub when the body qualifies as a stub;
+                # non-stub units carry no 'is_stub' key.
+                if _is_stub_body(node):
+                    unit["is_stub"] = True
                 units.append(unit)
 
     # Third pass: emit API call sites.

@@ -811,3 +811,298 @@ class TestRealDataNoopGuard:
             f"Some valid annotated units were wrongly dropped: "
             f"{[u['name'] for u in units if u not in result]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3.3: trivial-unit rejection helpers and pipeline integration
+# ---------------------------------------------------------------------------
+
+from scripts.repo.generate_from_code import (
+    _is_dunder_name,
+    _is_trivial_unit,
+    _filter_trivial_units,
+)
+
+
+class TestIsDunderName:
+    """Unit tests for _is_dunder_name."""
+
+    def test_dunder_enter_is_dunder(self):
+        assert _is_dunder_name("__enter__") is True
+
+    def test_dunder_exit_is_dunder(self):
+        assert _is_dunder_name("__exit__") is True
+
+    def test_dunder_repr_is_dunder(self):
+        assert _is_dunder_name("__repr__") is True
+
+    def test_dunder_len_is_dunder(self):
+        assert _is_dunder_name("__len__") is True
+
+    def test_dunder_call_is_dunder(self):
+        assert _is_dunder_name("__call__") is True
+
+    def test_dunder_init_is_dunder(self):
+        # __init__ IS a dunder name — it's just in the keep-set.
+        assert _is_dunder_name("__init__") is True
+
+    def test_normal_name_not_dunder(self):
+        assert _is_dunder_name("compute") is False
+
+    def test_single_underscore_not_dunder(self):
+        assert _is_dunder_name("_private") is False
+
+    def test_non_string_not_dunder(self):
+        assert _is_dunder_name(None) is False
+        assert _is_dunder_name(42) is False
+
+    def test_too_short_not_dunder(self):
+        # "__" (len==2) and "____" (len==4) must not be dunders.
+        assert _is_dunder_name("__") is False
+        assert _is_dunder_name("____") is False
+
+
+class TestIsTrivialUnit:
+    """Unit tests for _is_trivial_unit."""
+
+    def test_dunder_enter_method_is_trivial(self):
+        unit = {"type": "method", "name": "__enter__", "file": "a.py", "class": "Ctx"}
+        assert _is_trivial_unit(unit) is True
+
+    def test_dunder_enter_function_is_trivial(self):
+        # Top-level __enter__ is unusual but rules are the same.
+        unit = {"type": "function", "name": "__enter__", "file": "a.py"}
+        assert _is_trivial_unit(unit) is True
+
+    def test_dunder_init_is_NOT_trivial(self):
+        unit = {"type": "method", "name": "__init__", "file": "a.py", "class": "Foo"}
+        assert _is_trivial_unit(unit) is False
+
+    def test_stub_function_is_trivial(self):
+        unit = {"type": "function", "name": "stub_fn", "file": "a.py", "is_stub": True}
+        assert _is_trivial_unit(unit) is True
+
+    def test_stub_method_is_trivial(self):
+        unit = {"type": "method", "name": "stub_m", "file": "a.py", "class": "X", "is_stub": True}
+        assert _is_trivial_unit(unit) is True
+
+    def test_normal_function_not_trivial(self):
+        unit = {"type": "function", "name": "compute", "file": "a.py"}
+        assert _is_trivial_unit(unit) is False
+
+    def test_normal_method_not_trivial(self):
+        unit = {"type": "method", "name": "do_work", "file": "a.py", "class": "Worker"}
+        assert _is_trivial_unit(unit) is False
+
+    def test_class_unit_never_trivial_even_if_dunder_named(self):
+        unit = {"type": "class", "name": "__enter__", "file": "a.py"}
+        assert _is_trivial_unit(unit) is False
+
+    def test_api_call_never_trivial(self):
+        unit = {"type": "api_call", "name": "requests.get", "file": "a.py"}
+        assert _is_trivial_unit(unit) is False
+
+
+class TestFilterTrivialUnits:
+    """Unit tests for _filter_trivial_units."""
+
+    def test_drops_dunder_enter(self):
+        good = {"type": "method", "name": "do_work", "file": "a.py", "class": "X"}
+        bad = {"type": "method", "name": "__enter__", "file": "a.py", "class": "X"}
+        result = _filter_trivial_units([good, bad])
+        assert result == [good]
+
+    def test_keeps_dunder_init(self):
+        init = {"type": "method", "name": "__init__", "file": "a.py", "class": "Foo"}
+        other = {"type": "method", "name": "__exit__", "file": "a.py", "class": "Foo"}
+        result = _filter_trivial_units([init, other])
+        assert result == [init]
+
+    def test_drops_stub_unit(self):
+        stub = {"type": "function", "name": "stub_fn", "file": "a.py", "is_stub": True}
+        real = {"type": "function", "name": "real_fn", "file": "a.py"}
+        result = _filter_trivial_units([stub, real])
+        assert result == [real]
+
+    def test_keeps_class_and_api_call(self):
+        cls = {"type": "class", "name": "Foo", "file": "a.py"}
+        api = {"type": "api_call", "name": "requests.get", "file": "a.py"}
+        result = _filter_trivial_units([cls, api])
+        assert result == [cls, api]
+
+    def test_preserves_order(self):
+        units = [
+            {"type": "function", "name": f"fn_{i}", "file": "a.py"}
+            for i in range(5)
+        ]
+        result = _filter_trivial_units(units)
+        assert result == units
+
+    def test_empty_input(self):
+        assert _filter_trivial_units([]) == []
+
+    def test_all_trivial_returns_empty(self):
+        units = [
+            {"type": "method", "name": "__enter__", "file": "a.py", "class": "X"},
+            {"type": "function", "name": "stub", "file": "a.py", "is_stub": True},
+        ]
+        assert _filter_trivial_units(units) == []
+
+
+class TestPipelineRejectTrivialFlag:
+    """Tests for the reject_trivial flag wired into generate_from_repo."""
+
+    def test_flag_false_keeps_stub_and_dunder_end_to_end(self, monkeypatch):
+        """With reject_trivial=False (default), stubs and dunders survive.
+
+        If the guard were always active, stub_fn and __enter__ would be dropped —
+        causing this test to fail.
+        """
+        stub = {"type": "function", "name": "stub_fn", "file": "mod.py", "is_stub": True}
+        dunder = {"type": "method", "name": "__enter__", "file": "mod.py", "class": "Ctx"}
+        good = {"type": "function", "name": "good_fn", "file": "mod.py"}
+        init = {"type": "method", "name": "__init__", "file": "mod.py", "class": "Ctx"}
+
+        monkeypatch.setattr(
+            "scripts.repo.scan_repo.scan_repo",
+            lambda config: [stub, dunder, good, init],
+        )
+
+        config = _make_config(
+            reject_trivial=False,
+            extraction_units=["functions", "methods"],
+        )
+        train, holdout = generate_from_repo(config)
+        names = {r["output"]["name"] for r in (train + holdout)}
+
+        assert "stub_fn" in names, "stub_fn must survive when reject_trivial=False"
+        assert "__enter__" in names, "__enter__ must survive when reject_trivial=False"
+        assert "good_fn" in names
+        assert "__init__" in names
+
+    def test_flag_true_drops_stub_and_dunder_end_to_end(self, monkeypatch):
+        """With reject_trivial=True, stubs and dunders (except __init__) are dropped.
+
+        Exercises both rejection categories in a single end-to-end run through
+        generate_from_repo.
+        """
+        stub = {"type": "function", "name": "stub_fn", "file": "mod.py", "is_stub": True}
+        dunder = {"type": "method", "name": "__enter__", "file": "mod.py", "class": "Ctx"}
+        good = {"type": "function", "name": "good_fn", "file": "mod.py"}
+        init = {"type": "method", "name": "__init__", "file": "mod.py", "class": "Ctx"}
+
+        monkeypatch.setattr(
+            "scripts.repo.scan_repo.scan_repo",
+            lambda config: [stub, dunder, good, init],
+        )
+
+        config = _make_config(
+            reject_trivial=True,
+            extraction_units=["functions", "methods"],
+        )
+        train, holdout = generate_from_repo(config)
+        names = {r["output"]["name"] for r in (train + holdout)}
+
+        assert "stub_fn" not in names, "stub_fn must be dropped when reject_trivial=True"
+        assert "__enter__" not in names, "__enter__ must be dropped when reject_trivial=True"
+        assert "good_fn" in names, "good_fn must survive"
+        assert "__init__" in names, "__init__ must survive (kept dunder)"
+
+    def test_default_config_has_reject_trivial_false(self):
+        """Default RepoConfig has reject_trivial=False."""
+        config = _make_config()
+        assert config.reject_trivial is False
+
+
+class TestLoaderRejectTrivialRoundtrip:
+    """reject_trivial round-trips through load_repo_config."""
+
+    def test_reject_trivial_true_from_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir()
+            cfg_path = tmp_path / "repo.yaml"
+            cfg_path.write_text(
+                f"name: rt-test\npath: {repo_dir}\n"
+                "generation:\n"
+                "  reject_trivial: true\n"
+            )
+            from scripts.repo.loader import load_repo_config
+            config = load_repo_config(cfg_path)
+            assert config.reject_trivial is True
+
+    def test_reject_trivial_omitted_defaults_to_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir()
+            cfg_path = tmp_path / "repo.yaml"
+            cfg_path.write_text(f"name: rt-default\npath: {repo_dir}\n")
+            from scripts.repo.loader import load_repo_config
+            config = load_repo_config(cfg_path)
+            assert config.reject_trivial is False
+
+    def test_reject_trivial_false_from_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir()
+            cfg_path = tmp_path / "repo.yaml"
+            cfg_path.write_text(
+                f"name: rt-false\npath: {repo_dir}\n"
+                "generation:\n"
+                "  reject_trivial: false\n"
+            )
+            from scripts.repo.loader import load_repo_config
+            config = load_repo_config(cfg_path)
+            assert config.reject_trivial is False
+
+
+class TestTrivialRejectionDeterminism:
+    """Same input → identical filtered output across two calls."""
+
+    def test_same_input_same_output(self):
+        units = [
+            {"type": "function", "name": f"fn_{i}", "file": "a.py"}
+            for i in range(5)
+        ]
+        units.append({"type": "function", "name": "stub", "file": "a.py", "is_stub": True})
+        units.append({"type": "method", "name": "__enter__", "file": "a.py", "class": "X"})
+        result1 = _filter_trivial_units(units)
+        result2 = _filter_trivial_units(units)
+        assert result1 == result2
+
+
+class TestBothFiltersInteraction:
+    """validate_syntax + reject_trivial applied together."""
+
+    def test_both_flags_drop_respective_units(self, monkeypatch):
+        """When both flags are True, malformed-sig AND stub/dunder units are both dropped."""
+        malformed = {
+            "type": "function", "name": "malformed", "file": "mod.py",
+            "signature": "malformed(1 2)",
+        }
+        stub = {"type": "function", "name": "stub_fn", "file": "mod.py", "is_stub": True}
+        dunder = {"type": "method", "name": "__exit__", "file": "mod.py", "class": "Ctx"}
+        good = {"type": "function", "name": "good_fn", "file": "mod.py"}
+        init = {"type": "method", "name": "__init__", "file": "mod.py", "class": "Ctx"}
+
+        monkeypatch.setattr(
+            "scripts.repo.scan_repo.scan_repo",
+            lambda config: [malformed, stub, dunder, good, init],
+        )
+
+        config = _make_config(
+            validate_syntax=True,
+            reject_trivial=True,
+            extraction_units=["functions", "methods"],
+        )
+        train, holdout = generate_from_repo(config)
+        names = {r["output"]["name"] for r in (train + holdout)}
+
+        assert "malformed" not in names, "Malformed-sig unit must be dropped by validate_syntax"
+        assert "stub_fn" not in names, "Stub unit must be dropped by reject_trivial"
+        assert "__exit__" not in names, "__exit__ must be dropped by reject_trivial"
+        assert "good_fn" in names
+        assert "__init__" in names

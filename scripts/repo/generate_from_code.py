@@ -881,6 +881,52 @@ def _filter_invalid_syntax(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Trivial-unit rejection (Milestone 3.3)
+# ---------------------------------------------------------------------------
+
+_DUNDER_KEEP: frozenset = frozenset({"__init__"})
+
+
+def _is_dunder_name(name) -> bool:
+    """Return True iff name is a dunder (e.g. __enter__, __repr__).
+
+    A dunder name starts and ends with '__' and has length > 4 (i.e. at least
+    one character between the double-underscores on each side).
+    """
+    return (
+        isinstance(name, str)
+        and len(name) > 4
+        and name.startswith("__")
+        and name.endswith("__")
+    )
+
+
+def _is_trivial_unit(unit: Dict[str, Any]) -> bool:
+    """Return True when a function/method unit should be rejected as trivial.
+
+    Only considers units of type 'function' or 'method'. Classes and api_calls
+    are never trivial regardless of name.
+
+    A unit is trivial when:
+      - its body is a stub (is_stub=True was set by the scanner), OR
+      - its name is a dunder other than __init__ (e.g. __enter__, __repr__).
+    """
+    if unit.get("type") not in ("function", "method"):
+        return False
+    if unit.get("is_stub"):
+        return True
+    name = unit.get("name")
+    if _is_dunder_name(name) and name not in _DUNDER_KEEP:
+        return True
+    return False
+
+
+def _filter_trivial_units(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return units that are not trivial, preserving input order."""
+    return [u for u in units if not _is_trivial_unit(u)]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -934,6 +980,8 @@ def generate_from_repo(config) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
     units = _filter_units_by_config(units, config)
     if getattr(config, "validate_syntax", False):
         units = _filter_invalid_syntax(units)
+    if getattr(config, "reject_trivial", False):
+        units = _filter_trivial_units(units)
     units = _cap_units(units, config.target_records)
     style = _style_from_config(config)
     strategy = getattr(config, "holdout_strategy", "hash")
@@ -1025,6 +1073,10 @@ def main() -> None:
         before = len(units)
         units = _filter_invalid_syntax(units)
         print(f"  Syntax validation: dropped {before - len(units)} malformed units")
+    if getattr(config, "reject_trivial", False):
+        before = len(units)
+        units = _filter_trivial_units(units)
+        print(f"  Trivial rejection: dropped {before - len(units)} units")
     units = _cap_units(units, config.target_records)
     print(f"  After filter/cap: {len(units)} units")
 

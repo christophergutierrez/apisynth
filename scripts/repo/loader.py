@@ -21,6 +21,7 @@ DEFAULT_HOLDOUT_RATIO = 0.15
 DEFAULT_THINKING_STYLE = "deterministic"
 DEFAULT_HOLDOUT_STRATEGY = "hash"
 DEFAULT_VALIDATE_SYNTAX = False
+DEFAULT_REJECT_TRIVIAL = False
 
 
 @dataclass
@@ -42,6 +43,7 @@ class RepoConfig:
     commit: str | None = None
     manual_overrides: str | None = None
     validate_syntax: bool = DEFAULT_VALIDATE_SYNTAX
+    reject_trivial: bool = DEFAULT_REJECT_TRIVIAL
 
 
 def _ensure_list(value, default):
@@ -138,6 +140,7 @@ def load_repo_config(config_path: str | Path) -> RepoConfig:
         commit=identity.get("commit") if isinstance(identity.get("commit"), str) else None,
         manual_overrides=raw_manual_overrides,
         validate_syntax=bool(generation_section.get("validate_syntax", DEFAULT_VALIDATE_SYNTAX)),
+        reject_trivial=bool(generation_section.get("reject_trivial", DEFAULT_REJECT_TRIVIAL)),
     )
 
     # Validation
