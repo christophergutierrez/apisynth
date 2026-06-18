@@ -63,8 +63,8 @@ See [docs/REPO_SOURCES.md](docs/REPO_SOURCES.md) for the full code-path guide.
 pip install -r requirements.txt             # all scripts (pinned versions)
 # or manually:
 pip install pyyaml                          # all scripts
-pip install sentence-transformers scikit-learn joblib  # train_router.py only
-# vLLM server required for bootstrap_traces.py (see its --vllm-url flag)
+pip install sentence-transformers scikit-learn joblib  # routers (train_router.py, train_code_router.py) + bootstrap dedup
+# vLLM server required for bootstrap_traces.py / bootstrap_code_traces.py (see their --vllm-url flag)
 ```
 
 > **Note:** The router classifier artifact (`router_classifier.joblib`) is sensitive to the

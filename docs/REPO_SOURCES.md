@@ -53,7 +53,7 @@ The code path uses a `type: "code"` discriminator. Full specs are in
   "question": "How do I use `scan_repo`?",
   "thinking": "Entity: function scan_repo\nFile: scripts/repo/scan_repo.py\n...",
   "output": {"unit": "function", "name": "scan_repo",
-             "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(...)"}
+             "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(config)"}
 }
 ```
 

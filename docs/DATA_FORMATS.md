@@ -182,12 +182,12 @@ Written by `generate_from_code.py` (via `repo_pipeline.py`). One JSON object per
 {
   "type": "code",
   "question": "How do I use `scan_repo`?",
-  "thinking": "Entity: function scan_repo\nFile: scripts/repo/scan_repo.py\nScope: single unit -- top-level function\nUse: call scan_repo(...)",
+  "thinking": "Entity: function scan_repo\nFile: scripts/repo/scan_repo.py\nScope: single unit -- top-level function\nUse: call scan_repo(config)",
   "output": {
     "unit": "function",
     "name": "scan_repo",
     "file": "scripts/repo/scan_repo.py",
-    "signature": "scan_repo(...)"
+    "signature": "scan_repo(config)"
   }
 }
 ```
@@ -223,8 +223,8 @@ Written by `gen_code_dpo.py`. The `chosen`/`rejected` values are `output` dicts 
 {
   "type": "code",
   "question": "How do I use `scan_repo`?",
-  "chosen":   {"unit": "function", "name": "scan_repo", "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(...)"},
-  "rejected": {"unit": "function", "name": "scan_repo_TYPO", "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(...)"}
+  "chosen":   {"unit": "function", "name": "scan_repo", "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(config)"},
+  "rejected": {"unit": "function", "name": "scan_repo_TYPO", "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(config)"}
 }
 ```
 
