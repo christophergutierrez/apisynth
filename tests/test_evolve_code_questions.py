@@ -14,6 +14,7 @@ from evolve_code_questions import (
     _axis_paraphrase,
     _axis_context,
     _axis_task_pattern,
+    _discover_training_files,
     _evolve_record,
     evolve_file,
     _AXES,
@@ -585,3 +586,54 @@ class TestEvolvedRecordTagging:
             evolved = _evolve_record(record, axis)
             if evolved is not None:
                 assert evolved["type"] == "code"
+
+
+# ---------------------------------------------------------------------------
+# Tests: directory discovery (P2 — single repo dir must be processed)
+# ---------------------------------------------------------------------------
+
+class TestDiscoverTrainingFiles:
+    def test_direct_training_jsonl_found(self, tmp_path):
+        # --input-dir data/repos/<repo> where training.jsonl sits directly inside
+        # must be discovered (previously globbing only */training.jsonl missed it
+        # and silently processed zero records).
+        direct = tmp_path / "training.jsonl"
+        direct.write_text("", encoding="utf-8")
+        files = _discover_training_files(tmp_path)
+        assert files == [direct]
+
+    def test_nested_repos_found(self, tmp_path):
+        # --input-dir data/repos (parent of repo dirs) still discovers each
+        # <repo>/training.jsonl.
+        r1 = tmp_path / "repo_a"
+        r1.mkdir()
+        f1 = r1 / "training.jsonl"
+        f1.write_text("", encoding="utf-8")
+        r2 = tmp_path / "repo_b"
+        r2.mkdir()
+        f2 = r2 / "training.jsonl"
+        f2.write_text("", encoding="utf-8")
+        files = _discover_training_files(tmp_path)
+        assert set(files) == {f1, f2}
+
+    def test_direct_and_nested_no_duplicates(self, tmp_path):
+        direct = tmp_path / "training.jsonl"
+        direct.write_text("", encoding="utf-8")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        nested = sub / "training.jsonl"
+        nested.write_text("", encoding="utf-8")
+        files = _discover_training_files(tmp_path)
+        assert files.count(direct) == 1
+        assert direct in files and nested in files
+        assert len(files) == 2
+
+    def test_holdout_not_discovered(self, tmp_path):
+        # Only training.jsonl is evolved; a sibling holdout.jsonl is ignored.
+        (tmp_path / "training.jsonl").write_text("", encoding="utf-8")
+        (tmp_path / "holdout.jsonl").write_text("", encoding="utf-8")
+        files = _discover_training_files(tmp_path)
+        assert {p.name for p in files} == {"training.jsonl"}
+
+    def test_empty_dir_returns_empty(self, tmp_path):
+        assert _discover_training_files(tmp_path) == []

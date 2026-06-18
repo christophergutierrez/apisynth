@@ -187,15 +187,25 @@ class TestResolveInputPaths:
         paths = resolve_input_paths(str(p), None)
         assert paths == [p]
 
-    def test_input_dir(self, tmp_path):
-        (tmp_path / "a.jsonl").write_text("", encoding="utf-8")
-        (tmp_path / "b.jsonl").write_text("", encoding="utf-8")
+    def test_input_dir_only_training_jsonl(self, tmp_path):
+        # Directory mode must pick up training.jsonl (incl. nested) but NOT
+        # sibling holdout.jsonl / dpo.jsonl — globbing every *.jsonl would leak
+        # held-out examples into the router split (P1).
+        (tmp_path / "training.jsonl").write_text("", encoding="utf-8")
+        (tmp_path / "holdout.jsonl").write_text("", encoding="utf-8")
+        (tmp_path / "dpo.jsonl").write_text("", encoding="utf-8")
         (tmp_path / "not_jsonl.txt").write_text("", encoding="utf-8")
+        nested = tmp_path / "bootstrapped"
+        nested.mkdir()
+        (nested / "training.jsonl").write_text("", encoding="utf-8")
         paths = resolve_input_paths(None, str(tmp_path))
-        jsonl_names = {p.name for p in paths}
-        assert "a.jsonl" in jsonl_names
-        assert "b.jsonl" in jsonl_names
-        assert "not_jsonl.txt" not in jsonl_names
+        names = {p.name for p in paths}
+        assert names == {"training.jsonl"}
+        # Both the top-level and nested training.jsonl are included.
+        assert (tmp_path / "training.jsonl") in paths
+        assert (nested / "training.jsonl") in paths
+        # The held-out file is never read.
+        assert (tmp_path / "holdout.jsonl") not in paths
 
     def test_no_input_raises_sysexit(self):
         with pytest.raises(SystemExit):
@@ -206,15 +216,42 @@ class TestResolveInputPaths:
             resolve_input_paths(None, "/no/such/dir")
 
     def test_combined_file_and_dir(self, tmp_path):
+        # An explicit --input file is included regardless of its name; the
+        # --input-dir contributes only its training.jsonl.
         p1 = tmp_path / "explicit.jsonl"
         p1.write_text("", encoding="utf-8")
         subdir = tmp_path / "sub"
         subdir.mkdir()
-        p2 = subdir / "other.jsonl"
+        p2 = subdir / "training.jsonl"
         p2.write_text("", encoding="utf-8")
+        other = subdir / "holdout.jsonl"
+        other.write_text("", encoding="utf-8")
         paths = resolve_input_paths(str(p1), str(subdir))
         assert p1 in paths
         assert p2 in paths
+        assert other not in paths
+
+    def test_holdout_records_do_not_leak_into_router_data(self, tmp_path):
+        # End-to-end at the data level: a repo dir with training.jsonl AND
+        # holdout.jsonl must yield router records ONLY from training (P1).
+        train_rec = {
+            "type": "code", "question": "How do I use train_fn?",
+            "output": {"unit": "function", "name": "train_fn",
+                       "file": "src/train.py", "signature": "train_fn()"},
+        }
+        held_rec = {
+            "type": "code", "question": "How do I use HELD_OUT_fn?",
+            "output": {"unit": "function", "name": "held",
+                       "file": "src/HELDOUT.py", "signature": "held()"},
+        }
+        (tmp_path / "training.jsonl").write_text(json.dumps(train_rec) + "\n", encoding="utf-8")
+        (tmp_path / "holdout.jsonl").write_text(json.dumps(held_rec) + "\n", encoding="utf-8")
+
+        paths = resolve_input_paths(None, str(tmp_path))
+        records, _ = collect_records(paths)
+        route_keys = {r["route_key"] for r in records}
+        assert "src/train.py" in route_keys
+        assert "src/HELDOUT.py" not in route_keys
 
 
 # ---------------------------------------------------------------------------

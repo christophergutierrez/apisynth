@@ -22,7 +22,8 @@ Usage:
     # Single file
     python scripts/repo/gen_code_router_data.py --input data/repos/<name>/training.jsonl
 
-    # Directory of training.jsonl files (recurse one level)
+    # Directory of training.jsonl files (matched by name, at any depth;
+    # sibling holdout.jsonl is intentionally NOT included)
     python scripts/repo/gen_code_router_data.py --input-dir data/repos/<name>
 
     # Both --input and --input-dir can be combined.
@@ -106,7 +107,11 @@ def resolve_input_paths(input_file: str | None, input_dir: str | None) -> list[P
         d = Path(input_dir)
         if not d.is_dir():
             sys.exit(f"Input directory not found: {d}")
-        found = sorted(d.glob("*.jsonl")) + sorted(d.glob("**/*.jsonl"))
+        # Only training.jsonl files feed the router — globbing every *.jsonl would
+        # pull in sibling holdout.jsonl (and dpo/router outputs), leaking held-out
+        # examples into the router train/test split. Match the training.jsonl name
+        # directly and at any depth (e.g. bootstrapped/training.jsonl).
+        found = sorted(d.glob("training.jsonl")) + sorted(d.glob("**/training.jsonl"))
         # Deduplicate while preserving order
         seen: set[Path] = set()
         for p in found:

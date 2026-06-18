@@ -292,6 +292,33 @@ def evolve_file(
 
 
 # ---------------------------------------------------------------------------
+# Directory discovery
+# ---------------------------------------------------------------------------
+
+def _discover_training_files(input_dir: Path) -> list[Path]:
+    """Return the training.jsonl files to evolve under ``input_dir``.
+
+    Supports both documented layouts:
+      * a single repo directory — ``input_dir/training.jsonl`` sits directly
+        inside (the code-path layout, e.g. ``data/repos/<repo>``); and
+      * a parent-of-repos directory — ``input_dir/<repo>/training.jsonl``
+        (e.g. ``data/repos``).
+
+    Globbing only ``*/training.jsonl`` (as the API-path analog does) silently
+    misses the direct file, so passing a single repo dir would process zero
+    records.  Order is stable and duplicates are removed.
+    """
+    files: list[Path] = []
+    direct = input_dir / "training.jsonl"
+    if direct.is_file():
+        files.append(direct)
+    for nested in sorted(input_dir.glob("*/training.jsonl")):
+        if nested not in files:
+            files.append(nested)
+    return files
+
+
+# ---------------------------------------------------------------------------
 # CLI (mirrors evolve_questions.main)
 # ---------------------------------------------------------------------------
 
@@ -357,8 +384,12 @@ def main():
     if not input_dir.exists():
         sys.exit(f"Input directory not found: {input_dir}")
 
+    training_files = _discover_training_files(input_dir)
+    if not training_files:
+        print(f"No training.jsonl found under {input_dir}")
+
     total = 0
-    for jsonl in sorted(input_dir.glob("*/training.jsonl")):
+    for jsonl in training_files:
         print(f"\nProcessing: {jsonl}")
         written = evolve_file(
             input_path=jsonl,
