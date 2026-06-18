@@ -244,10 +244,18 @@ def code_field_accuracy(predicted: object, expected: dict) -> dict:
 def code_signature_valid(output: object) -> bool | None:
     """Return True if the predicted output's signature is well-formed, else False.
 
-    Validation form: wrap as ``def {sig}: pass`` and attempt ``ast.parse``.
-    This mirrors the contract in generate_from_code._signature_well_formed
-    (milestone 3.2).  Returns None when output is not a dict or has no
-    non-empty 'signature' key (absence is not a malformation).
+    Validation form depends on the unit kind:
+      - ``api_call`` units carry a *call-site* form (e.g.
+        ``requests.get(url, **kwargs)``) — a dotted name with call arguments,
+        which is NOT a definition. These are validated as expressions
+        (``ast.parse(sig)``); wrapping them as ``def {sig}: pass`` would
+        spuriously fail on the dotted receiver and penalise valid api_calls.
+      - all other units carry definition-style fragments validated via the
+        wrap-as-def form ``def {sig}: pass`` — the contract pinned in
+        generate_from_code._signature_well_formed (milestone 3.2).
+
+    Returns None when output is not a dict or has no non-empty 'signature' key
+    (absence is not a malformation).
     """
     if not isinstance(output, dict):
         return None
@@ -255,7 +263,10 @@ def code_signature_valid(output: object) -> bool | None:
     if not isinstance(sig, str) or not sig:
         return None
     try:
-        ast.parse(f"def {sig}: pass")
+        if output.get("unit") == "api_call":
+            ast.parse(sig)
+        else:
+            ast.parse(f"def {sig}: pass")
         return True
     except (SyntaxError, ValueError, TypeError):
         return False

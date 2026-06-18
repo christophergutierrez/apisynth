@@ -746,10 +746,32 @@ def _in_holdout(unit: Dict[str, Any], holdout_ratio: float) -> bool:
     return value < holdout_ratio
 
 
+def _stratified_unit_key(unit: Dict[str, Any]) -> Tuple[str, str, str, str, Any]:
+    """Return a stable per-unit identity for stratified holdout membership.
+
+    The bare ``(type, file, name)`` triple is NOT unique: same-named methods in
+    different classes within one file (e.g. ``A.foo`` and ``B.foo``) collapse to
+    the same triple, so designating one for holdout would drag every sibling
+    along — breaking the exact per-stratum ratio and leaking related units
+    across the split. Including ``class`` and ``lineno`` (the scanner sets
+    ``lineno`` on every unit, and two defs cannot start on the same line)
+    disambiguates them so each unit is split independently. ``class``/``lineno``
+    are read leniently (``"" `` / ``None``) so hand-built units without them
+    still produce a well-formed key.
+    """
+    return (
+        unit.get("type", ""),
+        unit["file"],
+        unit["name"],
+        unit.get("class") or "",
+        unit.get("lineno"),
+    )
+
+
 def _stratified_holdout_keys(
     units: List[Dict[str, Any]], holdout_ratio: float
-) -> Set[Tuple[str, str, str]]:
-    """Return a set of (type, file, name) keys that belong to holdout under stratified split.
+) -> Set[Tuple[str, str, str, str, Any]]:
+    """Return a set of per-unit keys that belong to holdout under stratified split.
 
     Groups units by their 'type' field, then within each group sorts by
     SHA-256 hex digest of "<file>:<name>" (stable across processes — never
@@ -759,10 +781,11 @@ def _stratified_holdout_keys(
 
     k uses banker's rounding (Python ``round``), e.g. n=105, ratio 0.20 → k=21.
 
-    Keys are the full triple ``(type, file, name)`` (NOT the bare
-    "<file>:<name>" string used by the "hash" path). This makes the per-type
-    guarantee EXACT even when two units of different types share a file:name —
-    the strata stay decoupled, so each type's holdout is exactly round(ratio*n).
+    Keys are the per-unit identity ``(type, file, name, class, lineno)`` from
+    _stratified_unit_key (NOT the bare "<file>:<name>" string used by the "hash"
+    path). This keeps the per-type guarantee EXACT even when units share a
+    type+file:name (same-named methods on different classes) — each unit is held
+    out independently, so a type's holdout is exactly round(ratio*n).
 
     Args:
         units:         List of scanner unit dicts with at minimum 'type',
@@ -770,7 +793,7 @@ def _stratified_holdout_keys(
         holdout_ratio: Desired fraction of each type to hold out (0.0–1.0).
 
     Returns:
-        Set of (type, file, name) tuples assigned to holdout.
+        Set of (type, file, name, class, lineno) tuples assigned to holdout.
     """
     # Group by type, preserving arbitrary input order within each group.
     groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -778,7 +801,7 @@ def _stratified_holdout_keys(
         unit_type = unit.get("type", "")
         groups.setdefault(unit_type, []).append(unit)
 
-    holdout_keys: Set[Tuple[str, str, str]] = set()
+    holdout_keys: Set[Tuple[str, str, str, str, Any]] = set()
     for _type, group in groups.items():
         n = len(group)
         k = round(holdout_ratio * n)
@@ -791,7 +814,7 @@ def _stratified_holdout_keys(
             ).hexdigest(),
         )
         for unit in sorted_group[:k]:
-            holdout_keys.add((unit["type"], unit["file"], unit["name"]))
+            holdout_keys.add(_stratified_unit_key(unit))
 
     return holdout_keys
 
@@ -821,7 +844,7 @@ def _split_records(
         holdout_keys = _stratified_holdout_keys(units, holdout_ratio)
         for unit in units:
             record = _make_record(unit, style=style)
-            if (unit["type"], unit["file"], unit["name"]) in holdout_keys:
+            if _stratified_unit_key(unit) in holdout_keys:
                 holdout_records.append(record)
             else:
                 train_records.append(record)

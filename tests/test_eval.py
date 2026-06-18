@@ -336,6 +336,40 @@ class TestCodeSignatureValid:
         output = {**_VALID_OUTPUT, "signature": ""}
         assert code_signature_valid(output) is None
 
+    def test_api_call_dotted_call_form_is_valid(self):
+        # api_call signatures are call-site forms (dotted receiver + call args),
+        # not def signatures. Validated as an expression, not wrap-as-def.
+        output = {
+            "unit": "api_call",
+            "name": "requests.get",
+            "file": "x.py",
+            "signature": "requests.get(url, **kwargs)",
+        }
+        assert code_signature_valid(output) is True
+
+    def test_api_call_plain_call_form_is_valid(self):
+        output = {
+            "unit": "api_call",
+            "name": "post",
+            "file": "x.py",
+            "signature": "post(url, data=None)",
+        }
+        assert code_signature_valid(output) is True
+
+    def test_api_call_malformed_is_invalid(self):
+        output = {
+            "unit": "api_call",
+            "name": "x",
+            "file": "x.py",
+            "signature": "requests.get(",
+        }
+        assert code_signature_valid(output) is False
+
+    def test_non_api_call_dotted_signature_is_invalid(self):
+        # A dotted call form on a non-api_call unit is NOT a valid def fragment.
+        output = {**_VALID_OUTPUT, "signature": "a.b(x)"}
+        assert code_signature_valid(output) is False
+
 
 class TestScoreCodeRecord:
     def test_perfect_self_match_no_sig_check(self):
@@ -397,6 +431,20 @@ class TestScoreCodeRecord:
         assert result["signature_valid"] is False
         expected_comp = round((1.0 + round(3 / 4, 4) + 0.0) / 3, 4)
         assert result["composite_score"] == expected_comp
+
+    def test_api_call_self_match_with_sig_check_is_gold(self):
+        # Regression: api_call call-site signatures must validate under
+        # --check-signature, not drop the record to BRONZE.
+        api = {
+            "unit": "api_call",
+            "name": "requests.get",
+            "file": "x.py",
+            "signature": "requests.get(url, **kwargs)",
+        }
+        result = score_code_record(api, api, check_signature=True)
+        assert result["signature_valid"] is True
+        assert result["composite_score"] == 1.0
+        assert result["band"] == "GOLD"
 
     def test_return_dict_keys(self):
         result = score_code_record(_VALID_OUTPUT, _VALID_OUTPUT)

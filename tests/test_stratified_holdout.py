@@ -122,6 +122,33 @@ def test_stratified_collision_across_types_exact_counts():
     assert len(train) + len(hold) == len(units)
 
 
+def test_stratified_same_type_duplicate_identity_splits_independently():
+    """Same-(type,file,name) units in ONE stratum split independently — no all-or-nothing.
+
+    Regression: four methods named ``foo`` on different classes in one file share
+    the bare (type,file,name) triple. Keying the holdout set on that triple would
+    select all four (or none) together — breaking the exact per-stratum ratio and
+    co-assigning related units. Keying on (type,file,name,class,lineno) holds out
+    exactly round(ratio*n) distinct units.
+    """
+    ratio = 0.25
+    units = [
+        _make_unit("method", "foo", file="m.py", lineno=10 + i, **{"class": c})
+        for i, c in enumerate(["A", "B", "C", "D"])
+    ]
+
+    train, hold = _split_records(units, ratio, strategy="stratified")
+
+    # Exactly round(0.25 * 4) == 1 held out (NOT all four).
+    assert len(hold) == 1, f"Expected 1 holdout, got {len(hold)}"
+    assert len(train) == 3
+    # The held-out unit is a single distinct class, and it is absent from train.
+    held_class = hold[0]["output"]["class"]
+    train_classes = {r["output"]["class"] for r in train}
+    assert held_class not in train_classes
+    assert len(train_classes) == 3
+
+
 def test_stratified_api_call_is_not_hash_skewed():
     """For 105 api_call units the stratified split yields 21, not ~43 from hash."""
     units = [_make_unit("api_call", f"api_{i}", file=f"a/api_{i}.py") for i in range(105)]
