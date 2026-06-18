@@ -329,6 +329,7 @@ class TestOverridePipeline:
         f = tmp_path / "o.yaml"
         f.write_text(yaml.dump({section: {key: value}}))
         load_manual_overrides(str(f))
+        return str(f)
 
     def test_make_record_returns_override(self, tmp_path):
         unit = _make_unit(name="foo", file="pkg/x.py")
@@ -356,8 +357,10 @@ class TestOverridePipeline:
     def test_generate_from_code_override(self, tmp_path):
         unit = _make_unit(name="foo", file="pkg/x.py")
         override = "GEN OVERRIDE"
-        self._load_override(tmp_path, "pkg/x.py:foo", override)
-        config = _make_config()
+        # generate_from_code loads overrides from its OWN config (not stale
+        # globals), so the override must be declared via config.manual_overrides.
+        path = self._load_override(tmp_path, "pkg/x.py:foo", override)
+        config = _make_config(manual_overrides=path)
         records = generate_from_code(config, [unit], style="linear")
         assert len(records) == 1
         assert records[0]["thinking"] == override
@@ -367,11 +370,34 @@ class TestOverridePipeline:
         unit_a = _make_unit(name="foo", file="pkg/x.py")
         unit_b = _make_unit(name="bar", file="pkg/y.py")
         override = "ONLY FOO OVERRIDE"
-        self._load_override(tmp_path, "pkg/x.py:foo", override)
-        config = _make_config()
+        path = self._load_override(tmp_path, "pkg/x.py:foo", override)
+        config = _make_config(manual_overrides=path)
         records = generate_from_code(config, [unit_a, unit_b], style="linear")
         assert records[0]["thinking"] == override
         assert "Entity:" in records[1]["thinking"]
+
+    def test_generate_from_code_clears_stale_overrides(self, tmp_path):
+        """Regression: generate_from_code must reflect only its OWN config's
+        overrides, not stale module globals left by a prior call.
+
+        Mirrors generate_from_repo()/main(): a config that declares no
+        manual_overrides must produce the generated trace, never an override
+        leaked into _MANUAL/_MANUAL_QOC by an earlier call.
+        """
+        unit = _make_unit(name="foo", file="pkg/x.py")
+        # A prior call populates the module-global override dicts.
+        self._load_override(tmp_path, "pkg/x.py:foo", "STALE OVERRIDE")
+        import scripts.repo.generate_from_code as mod
+        assert mod._MANUAL, "precondition: globals populated by prior call"
+
+        # This config declares no overrides → the stale global must NOT apply.
+        config = _make_config()
+        records = generate_from_code(config, [unit], style="linear")
+        assert records[0]["thinking"] != "STALE OVERRIDE"
+        assert "Entity:" in records[0]["thinking"]
+        # And the globals must have been cleared as a side effect.
+        assert mod._MANUAL == {}
+        assert mod._MANUAL_QOC == {}
 
 
 # ---------------------------------------------------------------------------

@@ -724,6 +724,12 @@ def generate_from_code(
         All records (train + holdout combined) as a list of dicts.
         Call _split_records() separately if you need the partition.
     """
+    # Unconditionally load (or clear) manual overrides from THIS config so the
+    # public path reflects only the config's declared overrides — consistent
+    # with generate_from_repo()/main() and free of stale module-global state
+    # left by a prior call (Milestone 2.4).
+    load_manual_overrides(getattr(config, "manual_overrides", None))
+
     # Resolve style from config when not explicitly supplied (single source of truth).
     if style is None:
         style = _style_from_config(config)
