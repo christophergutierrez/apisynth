@@ -11,6 +11,7 @@ import yaml
 # Constants for schema validation
 VALID_LANGUAGES = frozenset({"python"})
 VALID_EXTRACTION_UNITS = frozenset({"functions", "classes", "api_calls", "methods"})
+VALID_HOLDOUT_STRATEGIES = frozenset({"hash", "stratified"})
 
 DEFAULT_INCLUDE = ["**/*.py"]
 DEFAULT_EXTRACTION_UNITS = ["functions", "classes"]
@@ -18,6 +19,7 @@ DEFAULT_MIN_COMPLEXITY = "medium"
 DEFAULT_TARGET_RECORDS = 500
 DEFAULT_HOLDOUT_RATIO = 0.15
 DEFAULT_THINKING_STYLE = "deterministic"
+DEFAULT_HOLDOUT_STRATEGY = "hash"
 
 
 @dataclass
@@ -33,6 +35,7 @@ class RepoConfig:
     target_records: int = DEFAULT_TARGET_RECORDS
     holdout_ratio: float = DEFAULT_HOLDOUT_RATIO
     thinking_style: str = DEFAULT_THINKING_STYLE
+    holdout_strategy: str = DEFAULT_HOLDOUT_STRATEGY
     url: str | None = None
     branch: str | None = None
     commit: str | None = None
@@ -127,6 +130,7 @@ def load_repo_config(config_path: str | Path) -> RepoConfig:
         target_records=generation_section.get("target_records", DEFAULT_TARGET_RECORDS),
         holdout_ratio=generation_section.get("holdout_ratio", DEFAULT_HOLDOUT_RATIO),
         thinking_style=generation_section.get("thinking_style", DEFAULT_THINKING_STYLE),
+        holdout_strategy=generation_section.get("holdout_strategy", DEFAULT_HOLDOUT_STRATEGY),
         url=raw_url if has_url else None,
         branch=identity.get("branch") if isinstance(identity.get("branch"), str) else None,
         commit=identity.get("commit") if isinstance(identity.get("commit"), str) else None,
@@ -145,6 +149,11 @@ def load_repo_config(config_path: str | Path) -> RepoConfig:
         raise ValueError("holdout_ratio must be between 0 and 1")
     if config.target_records <= 0:
         raise ValueError("target_records must be positive")
+    if config.holdout_strategy not in VALID_HOLDOUT_STRATEGIES:
+        raise ValueError(
+            f"Invalid holdout_strategy: {config.holdout_strategy!r}. "
+            f"Must be one of: {sorted(VALID_HOLDOUT_STRATEGIES)}"
+        )
 
     # Path validation — only when url is not set (cannot stat a remote)
     if not has_url:

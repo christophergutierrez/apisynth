@@ -33,7 +33,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Ensure the repo root is on sys.path so that `scripts.*` imports work
 # regardless of the working directory when this file is executed directly.
@@ -702,23 +702,93 @@ def _in_holdout(unit: Dict[str, Any], holdout_ratio: float) -> bool:
     return value < holdout_ratio
 
 
+def _stratified_holdout_keys(
+    units: List[Dict[str, Any]], holdout_ratio: float
+) -> Set[Tuple[str, str, str]]:
+    """Return a set of (type, file, name) keys that belong to holdout under stratified split.
+
+    Groups units by their 'type' field, then within each group sorts by
+    SHA-256 hex digest of "<file>:<name>" (stable across processes — never
+    uses builtin hash()). The first k = round(holdout_ratio * n) units in
+    sorted order are designated holdout, guaranteeing ~holdout_ratio holdout
+    within EACH type stratum.
+
+    k uses banker's rounding (Python ``round``), e.g. n=105, ratio 0.20 → k=21.
+
+    Keys are the full triple ``(type, file, name)`` (NOT the bare
+    "<file>:<name>" string used by the "hash" path). This makes the per-type
+    guarantee EXACT even when two units of different types share a file:name —
+    the strata stay decoupled, so each type's holdout is exactly round(ratio*n).
+
+    Args:
+        units:         List of scanner unit dicts with at minimum 'type',
+                       'file', 'name'.
+        holdout_ratio: Desired fraction of each type to hold out (0.0–1.0).
+
+    Returns:
+        Set of (type, file, name) tuples assigned to holdout.
+    """
+    # Group by type, preserving arbitrary input order within each group.
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for unit in units:
+        unit_type = unit.get("type", "")
+        groups.setdefault(unit_type, []).append(unit)
+
+    holdout_keys: Set[Tuple[str, str, str]] = set()
+    for _type, group in groups.items():
+        n = len(group)
+        k = round(holdout_ratio * n)
+        # Sort within group by SHA-256 of "<file>:<name>" hex string — deterministic,
+        # process-independent (no salted builtin hash()).
+        sorted_group = sorted(
+            group,
+            key=lambda u: hashlib.sha256(
+                f"{u['file']}:{u['name']}".encode()
+            ).hexdigest(),
+        )
+        for unit in sorted_group[:k]:
+            holdout_keys.add((unit["type"], unit["file"], unit["name"]))
+
+    return holdout_keys
+
+
 def _split_records(
-    units: List[Dict[str, Any]], holdout_ratio: float, style: str = "linear"
+    units: List[Dict[str, Any]],
+    holdout_ratio: float,
+    style: str = "linear",
+    strategy: str = "hash",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Partition units into (train, holdout) records deterministically.
 
     The `style` arg ("linear" default, or "qoc") is threaded into _make_record
     so the production path (main()/generate_from_repo) honors thinking_style.
+
+    The `strategy` arg controls how units are assigned to holdout:
+      "hash"       (default) — per-unit SHA-256 threshold; preserves exact
+                   existing behaviour for all callers that omit the arg.
+      "stratified" — group by unit type, sort by hash within each group, and
+                   take the first round(holdout_ratio * n) per group; guarantees
+                   ~holdout_ratio holdout within EACH type stratum.
     """
     train_records: List[Dict[str, Any]] = []
     holdout_records: List[Dict[str, Any]] = []
 
-    for unit in units:
-        record = _make_record(unit, style=style)
-        if _in_holdout(unit, holdout_ratio):
-            holdout_records.append(record)
-        else:
-            train_records.append(record)
+    if strategy == "stratified":
+        holdout_keys = _stratified_holdout_keys(units, holdout_ratio)
+        for unit in units:
+            record = _make_record(unit, style=style)
+            if (unit["type"], unit["file"], unit["name"]) in holdout_keys:
+                holdout_records.append(record)
+            else:
+                train_records.append(record)
+    else:
+        # "hash" strategy: original per-unit threshold path (byte-identical to prior).
+        for unit in units:
+            record = _make_record(unit, style=style)
+            if _in_holdout(unit, holdout_ratio):
+                holdout_records.append(record)
+            else:
+                train_records.append(record)
 
     return train_records, holdout_records
 
@@ -815,7 +885,8 @@ def generate_from_repo(config) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
     units = _filter_units_by_config(units, config)
     units = _cap_units(units, config.target_records)
     style = _style_from_config(config)
-    return _split_records(units, config.holdout_ratio, style=style)
+    strategy = getattr(config, "holdout_strategy", "hash")
+    return _split_records(units, config.holdout_ratio, style=style, strategy=strategy)
 
 
 # ---------------------------------------------------------------------------
@@ -904,8 +975,9 @@ def main() -> None:
 
     # Derive trace style from config so written records honor thinking_style.
     style = _style_from_config(config)
+    strategy = getattr(config, "holdout_strategy", "hash")
     train_records, holdout_records = _split_records(
-        units, config.holdout_ratio, style=style
+        units, config.holdout_ratio, style=style, strategy=strategy
     )
     print(
         f"  Split: {len(train_records)} train / {len(holdout_records)} holdout "
