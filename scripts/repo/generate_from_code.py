@@ -101,12 +101,15 @@ def _pick_question(unit: Dict[str, Any]) -> str:
 def _signature_for(unit: Dict[str, Any]) -> str:
     """Return a best-effort signature string.
 
-    scan_repo does not store full argument lists — only name, type, file, lineno,
-    and (for methods) class. We synthesise a plausible signature from context:
+    When the unit carries a real 'signature' key (added by the scanner in
+    Milestone 2.3), that takes priority. Otherwise we fall back to synthesising
+    a plausible stub from context:
       - function / method: "<name>(…)" with a stub params note
       - api_call: "<receiver>.<method>(url, **kwargs)"
       - class: "<name>()"
     """
+    if unit.get("signature"):
+        return unit["signature"]
     name = unit["name"]
     unit_type = unit["type"]
     if unit_type == "function":
@@ -127,12 +130,23 @@ def _call_form(unit: Dict[str, Any]) -> str:
     For ``method`` units this drops the leading ``self``: a bound-method call
     ``instance.method(...)`` does NOT pass ``self`` explicitly, so embedding the
     definition signature ``method(self, ...)`` into a call form would teach an
-    invalid usage. All other unit types' definition signatures already reflect
-    how they are called.
+    invalid usage. When the scanner has populated 'call_signature', we use that
+    real call form; otherwise we fall back to the stub "<name>(...)". All other
+    unit types' definition signatures already reflect how they are called.
     """
     if unit["type"] == "method":
-        return f"{unit['name']}(...)"
+        return unit.get("call_signature") or f"{unit['name']}(...)"
     return _signature_for(unit)
+
+
+# ---------------------------------------------------------------------------
+# Docstring enrichment helper (Milestone 2.3)
+# ---------------------------------------------------------------------------
+
+def _doc_suffix(unit: Dict[str, Any]) -> str:
+    """Return '\nDoc: <docstring>' when the unit has a doc key, else ''."""
+    d = unit.get("doc")
+    return f"\nDoc: {d}" if d else ""
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +162,7 @@ def _linear_function(unit: Dict[str, Any]) -> str:
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     return (
         f"Entity: function {name}\n"
-        f"File: {location}\n"
+        f"File: {location}{_doc_suffix(unit)}\n"
         f"Scope: single unit — top-level function\n"
         f"Use: call {sig}\n"
         f"Params: see function signature in {file_path}"
@@ -176,7 +190,7 @@ def _linear_method(unit: Dict[str, Any]) -> str:
 
     return (
         f"{entity_line}\n"
-        f"File: {location}\n"
+        f"File: {location}{_doc_suffix(unit)}\n"
         f"Scope: single unit — instance method\n"
         f"{use_line}\n"
         f"NOT: calling {name}() as a standalone function"
@@ -192,7 +206,7 @@ def _linear_class(unit: Dict[str, Any]) -> str:
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     return (
         f"Entity: class {name}\n"
-        f"File: {location}\n"
+        f"File: {location}{_doc_suffix(unit)}\n"
         f"Scope: single unit — class definition\n"
         f"Use: instantiate with {sig}\n"
         f"Params: see __init__ in {file_path}"
@@ -251,7 +265,7 @@ def _qoc_function(unit: Dict[str, Any]) -> str:
     sig = _signature_for(unit)
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     return (
-        f"Question: How should `{name}` be invoked — as a direct call or via an object?\n"
+        f"Question: How should `{name}` be invoked — as a direct call or via an object?{_doc_suffix(unit)}\n"
         f"Option A: call directly — {sig}  (top-level function, no instance needed)\n"
         f"Option B: call on an instance — would only apply if it were a method\n"
         f"Criteria: `{name}` is a top-level function at {location}. "
@@ -272,14 +286,14 @@ def _qoc_method(unit: Dict[str, Any]) -> str:
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
 
     if cls:
-        question_line = f"Question: Should `{name}` be called on a `{cls}` instance or as a standalone function?"
+        question_line = f"Question: Should `{name}` be called on a `{cls}` instance or as a standalone function?{_doc_suffix(unit)}"
         option_a = f"Option A: call on an instance — instance.{_call_form(unit)}  where instance is a {cls}"
         criteria = (
             f"Criteria: `{name}` is an instance method of `{cls}` at {location}. "
             f"An instance of `{cls}` must exist before calling. Option A wins."
         )
     else:
-        question_line = f"Question: Should `{name}` be called on an instance or as a standalone function?"
+        question_line = f"Question: Should `{name}` be called on an instance or as a standalone function?{_doc_suffix(unit)}"
         option_a = f"Option A: call on an instance — instance.{_call_form(unit)}"
         criteria = (
             f"Criteria: `{name}` is an instance method at {location}. "
@@ -303,7 +317,7 @@ def _qoc_class(unit: Dict[str, Any]) -> str:
     sig = _signature_for(unit)
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     return (
-        f"Question: Should `{name}` be instantiated or referenced as a type?\n"
+        f"Question: Should `{name}` be instantiated or referenced as a type?{_doc_suffix(unit)}\n"
         f"Option A: instantiate — {sig}  (creates a new {name} object)\n"
         f"Option B: reference the type — {name}  (use as a class object, e.g. for isinstance checks)\n"
         f"Criteria: `{name}` is a class defined at {location}. "

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import List, Dict, Any
 import ast
+import copy
 import fnmatch
 import shutil
 import subprocess
@@ -97,6 +98,32 @@ def _is_excluded(rel: Path, exclude_patterns: List[str]) -> bool:
     return _matches_any(rel_posix, exclude_patterns)
 
 
+def _render_signature(node) -> str:
+    """Full def signature 'name(<params>)' — params include self/cls for methods."""
+    return f"{node.name}({ast.unparse(node.args)})"
+
+
+def _drop_leading_self(arguments):
+    """Return a copy of an ast.arguments with a leading self/cls positional removed."""
+    args = copy.deepcopy(arguments)
+    lead = args.posonlyargs or args.args
+    if lead and lead[0].arg in ("self", "cls"):
+        if args.posonlyargs:
+            args.posonlyargs = args.posonlyargs[1:]
+        else:
+            args.args = args.args[1:]
+    return args
+
+
+def _docstring_summary(node):
+    """First non-empty line of the node's docstring (<=200 chars), or None."""
+    raw = ast.get_docstring(node, clean=True)
+    if not raw:
+        return None
+    first = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+    return first[:200] or None
+
+
 def _extract_api_calls(tree: ast.AST, rel_str: str) -> List[Dict[str, Any]]:
     """Walk *tree* and emit best-effort API call site units.
 
@@ -167,28 +194,70 @@ def _extract_units(tree: ast.AST, rel_str: str) -> List[Dict[str, Any]]:
     # Second pass: emit class, function, and method units.
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
-            units.append({
+            unit: Dict[str, Any] = {
                 "type": "class",
                 "name": node.name,
                 "file": rel_str,
                 "lineno": node.lineno,
-            })
+            }
+            doc = _docstring_summary(node)
+            if doc is not None:
+                unit["doc"] = doc
+            # Class signature: instantiation form — find __init__ and drop self.
+            try:
+                init_node = next(
+                    (
+                        child for child in node.body
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and child.name == "__init__"
+                    ),
+                    None,
+                )
+                if init_node is not None:
+                    unit["signature"] = (
+                        f"{node.name}({ast.unparse(_drop_leading_self(init_node.args))})"
+                    )
+            except Exception:
+                pass
+            units.append(unit)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if id(node) in method_parent:
-                units.append({
+                unit = {
                     "type": "method",
                     "name": node.name,
                     "file": rel_str,
                     "lineno": node.lineno,
                     "class": method_parent[id(node)],
-                })
+                }
+                doc = _docstring_summary(node)
+                if doc is not None:
+                    unit["doc"] = doc
+                try:
+                    unit["signature"] = _render_signature(node)
+                except Exception:
+                    pass
+                try:
+                    unit["call_signature"] = (
+                        f"{node.name}({ast.unparse(_drop_leading_self(node.args))})"
+                    )
+                except Exception:
+                    pass
+                units.append(unit)
             else:
-                units.append({
+                unit = {
                     "type": "function",
                     "name": node.name,
                     "file": rel_str,
                     "lineno": node.lineno,
-                })
+                }
+                doc = _docstring_summary(node)
+                if doc is not None:
+                    unit["doc"] = doc
+                try:
+                    unit["signature"] = _render_signature(node)
+                except Exception:
+                    pass
+                units.append(unit)
 
     # Third pass: emit API call sites.
     units.extend(_extract_api_calls(tree, rel_str))
