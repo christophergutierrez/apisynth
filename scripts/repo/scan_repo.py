@@ -115,6 +115,22 @@ def _drop_leading_self(arguments):
     return args
 
 
+def _method_kind(node) -> str | None:
+    """Return 'static', 'class', or None based on bare decorator names.
+
+    Only bare ``ast.Name`` decorators for ``staticmethod`` / ``classmethod``
+    are recognised; ``ast.Attribute`` or ``ast.Call`` decorators (e.g.
+    ``module.staticmethod`` or ``@some_decorator()``) return None.
+    """
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Name):
+            if dec.id == "staticmethod":
+                return "static"
+            if dec.id == "classmethod":
+                return "class"
+    return None
+
+
 def _docstring_summary(node):
     """First non-empty line of the node's docstring (<=200 chars), or None."""
     raw = ast.get_docstring(node, clean=True)
@@ -242,6 +258,11 @@ def _extract_units(tree: ast.AST, rel_str: str) -> List[Dict[str, Any]]:
                     )
                 except Exception:
                     pass
+                # Additive: only set method_kind for static/classmethod nodes;
+                # plain instance methods carry no 'method_kind' key.
+                kind = _method_kind(node)
+                if kind is not None:
+                    unit["method_kind"] = kind
                 units.append(unit)
             else:
                 unit = {

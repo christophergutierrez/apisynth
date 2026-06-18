@@ -231,18 +231,50 @@ def _linear_function(unit: Dict[str, Any]) -> str:
     )
 
 
+def _is_classlevel_method(unit: Dict[str, Any]) -> bool:
+    """Return True when the unit is a static or class method (has method_kind)."""
+    return unit.get("method_kind") in ("static", "class")
+
+
 def _linear_method(unit: Dict[str, Any]) -> str:
     """Linear trace for a method unit.
 
     Classless method units (no 'class' key) must NOT emit the literal 'None'.
+    Static/class methods render with the idiomatic ``ClassName.method(...)``
+    call form instead of the misleading instance-call framing.
     """
     name = unit["name"]
     file_path = unit["file"]
     lineno = unit.get("lineno")
     cls = unit.get("class") or ""  # guard against None and missing key
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
-
     call = _call_form(unit)
+
+    # Static/class methods: only emit class-level form when cls is known.
+    if _is_classlevel_method(unit) and cls:
+        kind = unit["method_kind"]
+        if kind == "static":
+            return (
+                f"Entity: staticmethod {name} on class {cls}\n"
+                f"File: {location}{_doc_suffix(unit)}\n"
+                f"Scope: single unit — static method\n"
+                f"Use: {cls}.{call}  # static method — no instance needed\n"
+                f"NOT: passing self or cls — a static method receives neither (calling via an instance is allowed but unnecessary)"
+            )
+        else:  # "class"
+            return (
+                f"Entity: classmethod {name} on class {cls}\n"
+                f"File: {location}{_doc_suffix(unit)}\n"
+                f"Scope: single unit — class method\n"
+                f"Use: {cls}.{call}  # classmethod — cls is bound automatically\n"
+                f"NOT: passing cls explicitly — Python binds it to {cls}"
+            )
+
+    # Plain instance methods (and static/class methods lacking a class name).
+    # The latter case is impossible-in-practice: scanner method units always
+    # carry a 'class' key, so a static/class method here would have to be a
+    # hand-built unit. We fall back to instance framing defensively to preserve
+    # the no-literal-'None' invariant rather than emit a bare '.method'.
     if cls:
         entity_line = f"Entity: method {name} on class {cls}"
         use_line = f"Use: instance.{call}  # where instance is a {cls}"
@@ -340,23 +372,50 @@ def _qoc_method(unit: Dict[str, Any]) -> str:
     """QOC trace for a method unit.
 
     Classless method units (no 'class' key) must NOT emit the literal 'None'.
+    Static/class methods render with the idiomatic class-call framing.
     """
     name = unit["name"]
     file_path = unit["file"]
     lineno = unit.get("lineno")
     cls = unit.get("class") or ""  # guard against None and missing key
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
+    call = _call_form(unit)
 
+    # Static/class methods: only emit class-level form when cls is known.
+    if _is_classlevel_method(unit) and cls:
+        kind = unit["method_kind"]
+        if kind == "static":
+            return (
+                f"Question: Should `{name}` be called on the `{cls}` class or as a standalone function?{_doc_suffix(unit)}\n"
+                f"Option A: call on the class — {cls}.{call}  (static method — no instance needed)\n"
+                f"Option B: call as a bare standalone function — {name}(...)  (incorrect — it is namespaced under {cls})\n"
+                f"Criteria: `{name}` is a static method of `{cls}` at {location}. It takes no self and needs no instance; call it via the class. Option A wins.\n"
+                f"NOT: passing self or cls to {name} — it receives neither (an instance may call it, but need not)"
+            )
+        else:  # "class"
+            return (
+                f"Question: Should `{name}` be called on the `{cls}` class or on an instance?{_doc_suffix(unit)}\n"
+                f"Option A: call on the class — {cls}.{call}  (classmethod — cls is bound automatically)\n"
+                f"Option B: call on an instance — instance.{call}  (also valid, but the class form is idiomatic)\n"
+                f"Criteria: `{name}` is a classmethod of `{cls}` at {location}. cls is bound automatically; no instance is required. Option A wins.\n"
+                f"NOT: passing cls explicitly — Python binds it to {cls}"
+            )
+
+    # Plain instance methods (and static/class methods lacking a class name).
+    # The latter case is impossible-in-practice: scanner method units always
+    # carry a 'class' key, so a static/class method here would have to be a
+    # hand-built unit. We fall back to instance framing defensively to preserve
+    # the no-literal-'None' invariant rather than emit a bare '.method'.
     if cls:
         question_line = f"Question: Should `{name}` be called on a `{cls}` instance or as a standalone function?{_doc_suffix(unit)}"
-        option_a = f"Option A: call on an instance — instance.{_call_form(unit)}  where instance is a {cls}"
+        option_a = f"Option A: call on an instance — instance.{call}  where instance is a {cls}"
         criteria = (
             f"Criteria: `{name}` is an instance method of `{cls}` at {location}. "
             f"An instance of `{cls}` must exist before calling. Option A wins."
         )
     else:
         question_line = f"Question: Should `{name}` be called on an instance or as a standalone function?{_doc_suffix(unit)}"
-        option_a = f"Option A: call on an instance — instance.{_call_form(unit)}"
+        option_a = f"Option A: call on an instance — instance.{call}"
         criteria = (
             f"Criteria: `{name}` is an instance method at {location}. "
             f"An instance of the owning class must exist before calling. Option A wins."

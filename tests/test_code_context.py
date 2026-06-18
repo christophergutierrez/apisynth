@@ -150,6 +150,31 @@ class TestScannerSignatures:
         for u in methods:
             assert "class" in u, f"Method {u['name']!r} is missing the 'class' key"
 
+    # ------------------------------------------------------------------
+    # method_kind key: static / class / absent for plain instance methods
+    # ------------------------------------------------------------------
+
+    def test_from_dict_has_method_kind_class(self, fixture_units):
+        """from_dict is a @classmethod — scanner must set method_kind='class'."""
+        u = _unit_by_name(fixture_units, "from_dict")
+        assert u.get("method_kind") == "class", (
+            f"Expected method_kind='class' for from_dict, got: {u.get('method_kind')!r}"
+        )
+
+    def test_validate_email_has_method_kind_static(self, fixture_units):
+        """validate_email is a @staticmethod — scanner must set method_kind='static'."""
+        u = _unit_by_name(fixture_units, "validate_email")
+        assert u.get("method_kind") == "static", (
+            f"Expected method_kind='static' for validate_email, got: {u.get('method_kind')!r}"
+        )
+
+    def test_greet_has_no_method_kind(self, fixture_units):
+        """greet is a plain instance method — 'method_kind' must NOT be present."""
+        u = _unit_by_name(fixture_units, "greet")
+        assert "method_kind" not in u, (
+            f"Plain instance method greet should not have 'method_kind', got: {u.get('method_kind')!r}"
+        )
+
 
 # ===========================================================================
 # Part B — Generator-side assertions
@@ -476,3 +501,254 @@ def test_enriched_cross_process_qoc_doc_line_present():
     assert "Doc: Convert text to URL-safe slug." in qoc_trace, (
         f"'Doc:' line missing from cross-process QOC trace:\n{qoc_trace}"
     )
+
+
+# ===========================================================================
+# Part C — Static/classmethod rendering tests (Milestone: trace-accuracy fix)
+# ===========================================================================
+
+# Canonical unit dicts mirroring the fixture scanner output for the two target
+# methods.  The 'method_kind' key is the additive key added by the scanner.
+_VALIDATE_EMAIL_UNIT = {
+    "type": "method",
+    "name": "validate_email",
+    "file": "core/models.py",
+    "lineno": 24,
+    "class": "User",
+    "signature": "validate_email(email: str)",
+    "call_signature": "validate_email(email: str)",
+    "method_kind": "static",
+}
+
+_FROM_DICT_UNIT = {
+    "type": "method",
+    "name": "from_dict",
+    "file": "core/models.py",
+    "lineno": 20,
+    "class": "User",
+    "signature": "from_dict(cls, data: dict)",
+    "call_signature": "from_dict(data: dict)",
+    "method_kind": "class",
+}
+
+_GREET_UNIT = {
+    "type": "method",
+    "name": "greet",
+    "file": "core/models.py",
+    "lineno": 13,
+    "class": "User",
+    "signature": "greet(self)",
+    "call_signature": "greet()",
+    # No 'method_kind' key — plain instance method.
+}
+
+
+class TestStaticmethodLinearTrace:
+    """Linear trace for validate_email (@staticmethod) renders correctly."""
+
+    def test_entity_line_says_staticmethod(self):
+        trace = _make_thinking(_VALIDATE_EMAIL_UNIT, style="linear")
+        assert "Entity: staticmethod validate_email on class User" in trace, (
+            f"Expected 'Entity: staticmethod' in linear trace:\n{trace}"
+        )
+
+    def test_class_dot_call_form_present(self):
+        trace = _make_thinking(_VALIDATE_EMAIL_UNIT, style="linear")
+        assert "User.validate_email(" in trace, (
+            f"Expected 'User.validate_email(' in linear trace:\n{trace}"
+        )
+
+    def test_no_instance_dot_in_use_line(self):
+        trace = _make_thinking(_VALIDATE_EMAIL_UNIT, style="linear")
+        assert "instance." not in trace, (
+            f"Linear static trace must not contain 'instance.':\n{trace}"
+        )
+
+    def test_no_misleading_standalone_not_line(self):
+        """The old 'NOT: calling ... standalone function' must not appear."""
+        trace = _make_thinking(_VALIDATE_EMAIL_UNIT, style="linear")
+        assert "NOT: calling validate_email() as a standalone function" not in trace, (
+            f"Misleading 'standalone function' NOT-line present in static trace:\n{trace}"
+        )
+
+    def test_deterministic(self):
+        t1 = _make_thinking(_VALIDATE_EMAIL_UNIT, style="linear")
+        t2 = _make_thinking(_VALIDATE_EMAIL_UNIT, style="linear")
+        assert t1 == t2, "Linear staticmethod trace is not deterministic"
+
+    def test_exact_trace(self):
+        """Full linear trace for validate_email must match the expected format exactly."""
+        expected = (
+            "Entity: staticmethod validate_email on class User\n"
+            "File: core/models.py:24\n"
+            "Scope: single unit — static method\n"
+            "Use: User.validate_email(email: str)  # static method — no instance needed\n"
+            "NOT: passing self or cls — a static method receives neither (calling via an instance is allowed but unnecessary)"
+        )
+        actual = _make_thinking(_VALIDATE_EMAIL_UNIT, style="linear")
+        assert actual == expected, (
+            f"Linear static trace does not match expected format.\n"
+            f"Expected:\n{expected}\n\nActual:\n{actual}"
+        )
+
+
+class TestClassmethodLinearTrace:
+    """Linear trace for from_dict (@classmethod) renders correctly."""
+
+    def test_entity_line_says_classmethod(self):
+        trace = _make_thinking(_FROM_DICT_UNIT, style="linear")
+        assert "Entity: classmethod from_dict on class User" in trace, (
+            f"Expected 'Entity: classmethod' in linear trace:\n{trace}"
+        )
+
+    def test_class_dot_call_form_present(self):
+        trace = _make_thinking(_FROM_DICT_UNIT, style="linear")
+        assert "User.from_dict(data: dict)" in trace, (
+            f"Expected 'User.from_dict(data: dict)' in linear trace:\n{trace}"
+        )
+
+    def test_no_instance_dot_in_use_line(self):
+        trace = _make_thinking(_FROM_DICT_UNIT, style="linear")
+        assert "instance." not in trace, (
+            f"Linear classmethod trace must not contain 'instance.':\n{trace}"
+        )
+
+    def test_cls_bound_note_present(self):
+        trace = _make_thinking(_FROM_DICT_UNIT, style="linear")
+        assert "cls is bound automatically" in trace or "cls" in trace, (
+            f"cls-bound note missing from classmethod trace:\n{trace}"
+        )
+
+    def test_deterministic(self):
+        t1 = _make_thinking(_FROM_DICT_UNIT, style="linear")
+        t2 = _make_thinking(_FROM_DICT_UNIT, style="linear")
+        assert t1 == t2, "Linear classmethod trace is not deterministic"
+
+    def test_exact_trace(self):
+        """Full linear trace for from_dict must match the expected format exactly."""
+        expected = (
+            "Entity: classmethod from_dict on class User\n"
+            "File: core/models.py:20\n"
+            "Scope: single unit — class method\n"
+            "Use: User.from_dict(data: dict)  # classmethod — cls is bound automatically\n"
+            "NOT: passing cls explicitly — Python binds it to User"
+        )
+        actual = _make_thinking(_FROM_DICT_UNIT, style="linear")
+        assert actual == expected, (
+            f"Linear classmethod trace does not match expected format.\n"
+            f"Expected:\n{expected}\n\nActual:\n{actual}"
+        )
+
+
+class TestStaticmethodQOCTrace:
+    """QOC trace for validate_email (@staticmethod) renders correctly."""
+
+    def test_question_mentions_class_not_instance(self):
+        trace = _make_thinking(_VALIDATE_EMAIL_UNIT, style="qoc")
+        assert "called on the `User` class" in trace, (
+            f"QOC static trace should ask about class call:\n{trace}"
+        )
+
+    def test_class_dot_call_form_present(self):
+        trace = _make_thinking(_VALIDATE_EMAIL_UNIT, style="qoc")
+        assert "User.validate_email(" in trace, (
+            f"Expected 'User.validate_email(' in QOC trace:\n{trace}"
+        )
+
+    def test_no_instance_dot_in_trace(self):
+        trace = _make_thinking(_VALIDATE_EMAIL_UNIT, style="qoc")
+        assert "instance." not in trace, (
+            f"QOC static trace must not contain 'instance.':\n{trace}"
+        )
+
+    def test_deterministic(self):
+        t1 = _make_thinking(_VALIDATE_EMAIL_UNIT, style="qoc")
+        t2 = _make_thinking(_VALIDATE_EMAIL_UNIT, style="qoc")
+        assert t1 == t2, "QOC staticmethod trace is not deterministic"
+
+    def test_exact_trace(self):
+        """Full QOC trace for validate_email must match the expected format exactly."""
+        expected = (
+            "Question: Should `validate_email` be called on the `User` class or as a standalone function?\n"
+            "Option A: call on the class — User.validate_email(email: str)  (static method — no instance needed)\n"
+            "Option B: call as a bare standalone function — validate_email(...)  (incorrect — it is namespaced under User)\n"
+            "Criteria: `validate_email` is a static method of `User` at core/models.py:24. It takes no self and needs no instance; call it via the class. Option A wins.\n"
+            "NOT: passing self or cls to validate_email — it receives neither (an instance may call it, but need not)"
+        )
+        actual = _make_thinking(_VALIDATE_EMAIL_UNIT, style="qoc")
+        assert actual == expected, (
+            f"QOC static trace does not match expected format.\n"
+            f"Expected:\n{expected}\n\nActual:\n{actual}"
+        )
+
+
+class TestClassmethodQOCTrace:
+    """QOC trace for from_dict (@classmethod) renders correctly."""
+
+    def test_question_mentions_class_not_instance(self):
+        trace = _make_thinking(_FROM_DICT_UNIT, style="qoc")
+        assert "called on the `User` class" in trace, (
+            f"QOC classmethod trace should ask about class call:\n{trace}"
+        )
+
+    def test_class_dot_call_form_present(self):
+        trace = _make_thinking(_FROM_DICT_UNIT, style="qoc")
+        assert "User.from_dict(data: dict)" in trace, (
+            f"Expected 'User.from_dict(data: dict)' in QOC trace:\n{trace}"
+        )
+
+    def test_no_instance_as_primary_option(self):
+        """Option A must be the class form, not instance form."""
+        trace = _make_thinking(_FROM_DICT_UNIT, style="qoc")
+        assert "Option A: call on the class" in trace, (
+            f"Option A should be 'call on the class' for classmethod:\n{trace}"
+        )
+
+    def test_deterministic(self):
+        t1 = _make_thinking(_FROM_DICT_UNIT, style="qoc")
+        t2 = _make_thinking(_FROM_DICT_UNIT, style="qoc")
+        assert t1 == t2, "QOC classmethod trace is not deterministic"
+
+    def test_exact_trace(self):
+        """Full QOC trace for from_dict must match the expected format exactly."""
+        expected = (
+            "Question: Should `from_dict` be called on the `User` class or on an instance?\n"
+            "Option A: call on the class — User.from_dict(data: dict)  (classmethod — cls is bound automatically)\n"
+            "Option B: call on an instance — instance.from_dict(data: dict)  (also valid, but the class form is idiomatic)\n"
+            "Criteria: `from_dict` is a classmethod of `User` at core/models.py:20. cls is bound automatically; no instance is required. Option A wins.\n"
+            "NOT: passing cls explicitly — Python binds it to User"
+        )
+        actual = _make_thinking(_FROM_DICT_UNIT, style="qoc")
+        assert actual == expected, (
+            f"QOC classmethod trace does not match expected format.\n"
+            f"Expected:\n{expected}\n\nActual:\n{actual}"
+        )
+
+
+class TestInstanceMethodRegressionAfterFix:
+    """Plain instance method greet must still render with instance-call framing."""
+
+    def test_linear_greet_still_uses_instance_framing(self):
+        trace = _make_thinking(_GREET_UNIT, style="linear")
+        assert "instance.greet()" in trace, (
+            f"greet instance-method trace must still use 'instance.greet()':\n{trace}"
+        )
+
+    def test_linear_greet_entity_says_method(self):
+        trace = _make_thinking(_GREET_UNIT, style="linear")
+        assert "Entity: method greet on class User" in trace, (
+            f"greet entity line must say 'method' (not staticmethod/classmethod):\n{trace}"
+        )
+
+    def test_qoc_greet_still_uses_instance_framing(self):
+        trace = _make_thinking(_GREET_UNIT, style="qoc")
+        assert "instance.greet()" in trace, (
+            f"greet QOC trace must still use 'instance.greet()':\n{trace}"
+        )
+
+    def test_greet_linear_no_method_kind_key(self):
+        """greet unit has no method_kind key — must not leak 'static' or 'class' text."""
+        assert "method_kind" not in _GREET_UNIT
+        trace = _make_thinking(_GREET_UNIT, style="linear")
+        assert "staticmethod" not in trace
+        assert "classmethod" not in trace
