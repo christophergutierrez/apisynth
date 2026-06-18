@@ -30,6 +30,22 @@ The pipeline implements several established methods:
 | **Paraphrase augmentation** | `evolve_questions.py` | Uses Claude to rewrite questions along multiple axes (formality, verbosity, synonyms) — same API call, broader surface-form coverage |
 | **Intent routing** | `train_router.py` | Trains a lightweight logistic-regression classifier to route to the right endpoint before the heavier LLM runs |
 
+### Two sources: APIs and code repositories
+
+apisynth has a second, parallel path that generates the same kinds of training data from a
+**source-code repository** instead of a live API. It teaches a model *natural language → code unit*
+(which function/method/class/API-call a question targets). The design mirrors the API path
+component-for-component, but swaps the verifier: where the API path uses the **live API** as ground
+truth, the code path uses **deterministic structural validators** (`scripts/eval.py`). This makes
+the whole code path offline and key-free (the one exception is STaR bootstrap, which calls a model
+server but still verifies offline). The scripts live in `scripts/repo/` and `scripts/repo_pipeline.py`.
+
+```bash
+python scripts/repo_pipeline.py --repo-dir repos/example   # scan a repo → training + holdout
+```
+
+See [docs/REPO_SOURCES.md](docs/REPO_SOURCES.md) for the full code-path guide.
+
 ## Documentation
 
 | Document | Contents |
@@ -37,7 +53,8 @@ The pipeline implements several established methods:
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pipeline works, why each component exists, data flow |
 | [docs/TUTORIAL.md](docs/TUTORIAL.md) | Step-by-step walkthrough for adding a new vendor |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors and how to fix them |
-| [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) | Schema for training.jsonl, holdout, router, and DPO files |
+| [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) | Schema for training.jsonl, holdout, router, and DPO files (API and code paths) |
+| [docs/REPO_SOURCES.md](docs/REPO_SOURCES.md) | The code/repo path: generating training data from a source repository |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Tuning workers, estimating timings, resuming interrupted runs |
 
 ## Prerequisites
@@ -70,7 +87,19 @@ apisynth/
 │   ├── bootstrap_traces.py  # STaR: run trained model, verify outputs, write new traces
 │   ├── gen_router_data.py  # Generate router classifier training data (no API calls)
 │   ├── train_router.py   # Train a logistic-regression intent router
-│   └── utils.py          # Shared utilities (humanize, PAGE_SIZES, extract_schema, infer_intent)
+│   ├── utils.py          # Shared utilities (humanize, PAGE_SIZES, extract_schema, infer_intent)
+│   ├── repo_pipeline.py  # Code-path orchestrator: scan→generate (see docs/REPO_SOURCES.md)
+│   └── repo/             # Code/repo path — generate training data from a source repository
+│       ├── scan_repo.py            # AST-extract code units (function/method/class/api_call)
+│       ├── generate_from_code.py   # Units → {type:"code", question, thinking, output} records
+│       ├── loader.py               # Parse repo.yaml into a RepoConfig
+│       ├── gen_code_dpo.py         # DPO pairs verified by eval.py validators (no API)
+│       ├── evolve_code_questions.py  # Deterministic template paraphrase (no LLM)
+│       ├── gen_code_router_data.py # Router data keyed by target file path
+│       ├── train_code_router.py    # Train the code-unit intent router
+│       └── bootstrap_code_traces.py  # STaR: model proposes, validators verify
+├── repos/               # Code-path repo configs (repo.yaml per source repository)
+│   └── example/repo.yaml
 ├── apis/
 │   └── <vendor>/
 │       ├── <endpoint>/
