@@ -36,6 +36,7 @@ class RepoConfig:
     url: str | None = None
     branch: str | None = None
     commit: str | None = None
+    manual_overrides: str | None = None
 
 
 def _ensure_list(value, default):
@@ -105,6 +106,16 @@ def load_repo_config(config_path: str | Path) -> RepoConfig:
     else:
         extraction_units = _ensure_list(raw_units, DEFAULT_EXTRACTION_UNITS)
 
+    # Resolve manual_overrides path from generation section.
+    # If it's a relative path, resolve it against the config file's directory.
+    raw_manual_overrides = generation_section.get("manual_overrides")
+    if isinstance(raw_manual_overrides, str) and raw_manual_overrides.strip():
+        mo_path = Path(raw_manual_overrides)
+        if not mo_path.is_absolute():
+            raw_manual_overrides = str((config_path.parent / mo_path).resolve())
+    else:
+        raw_manual_overrides = None
+
     config = RepoConfig(
         name=identity["name"],
         path=raw_path if has_path else None,
@@ -119,6 +130,7 @@ def load_repo_config(config_path: str | Path) -> RepoConfig:
         url=raw_url if has_url else None,
         branch=identity.get("branch") if isinstance(identity.get("branch"), str) else None,
         commit=identity.get("commit") if isinstance(identity.get("commit"), str) else None,
+        manual_overrides=raw_manual_overrides,
     )
 
     # Validation

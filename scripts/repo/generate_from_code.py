@@ -42,6 +42,68 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 # ---------------------------------------------------------------------------
+# Manual thinking-trace overrides, keyed by "<file>:<name>" (Milestone 2.4).
+# Mirrors add_thinking.py's _MANUAL/_MANUAL_QOC. Populated by load_manual_overrides().
+# ---------------------------------------------------------------------------
+
+_MANUAL: Dict[str, str] = {}
+_MANUAL_QOC: Dict[str, str] = {}
+
+
+def _unit_key(unit: Dict[str, Any]) -> str:
+    """Return the stable identity key '<file>:<name>' for a unit.
+
+    Note: this key collides for overloads or a same-name method+function in one
+    file (e.g. a top-level ``foo`` and a method ``foo`` in the same module both
+    map to '<file>:foo'). This is intentional and consistent with the existing
+    holdout-split (_in_holdout / _cap_units) and question-selection (_pick_question)
+    keying, which use the same '<file>:<name>' form.
+    """
+    return f"{unit['file']}:{unit['name']}"
+
+
+def clear_manual_overrides() -> None:
+    """Reset both override dicts to empty (for test isolation)."""
+    global _MANUAL, _MANUAL_QOC
+    _MANUAL = {}
+    _MANUAL_QOC = {}
+
+
+def load_manual_overrides(path) -> None:
+    """Load manual thinking-trace overrides from a YAML file.
+
+    REPLACE semantics: each call fully replaces both dicts (no accumulation).
+    - path is falsy → clears both dicts and returns.
+    - path does not exist → clears both dicts and returns (lenient).
+    - Otherwise, reads 'manual_traces' and 'manual_traces_qoc' sections.
+
+    Keys in the YAML are '<file>:<name>' strings (the unit identity key).
+    Values are full multi-line trace strings.
+    """
+    global _MANUAL, _MANUAL_QOC
+
+    if not path:
+        _MANUAL = {}
+        _MANUAL_QOC = {}
+        return
+
+    p = Path(path).expanduser()
+    if not p.exists():
+        # A path was configured but the file is missing — surface this as a
+        # misconfiguration signal (still lenient: clear and continue).
+        print(f"  WARNING: manual_overrides file not found: {p}", file=sys.stderr)
+        _MANUAL = {}
+        _MANUAL_QOC = {}
+        return
+
+    import yaml
+    with open(p) as f:
+        data = yaml.safe_load(f) or {}
+    _MANUAL = dict(data.get("manual_traces") or {})
+    _MANUAL_QOC = dict(data.get("manual_traces_qoc") or {})
+
+
+# ---------------------------------------------------------------------------
 # Question templates keyed by unit type
 # ---------------------------------------------------------------------------
 
@@ -373,6 +435,16 @@ def generate_code_thinking(unit: Dict[str, Any], style: str = "linear") -> str:
     Returns:
         A multi-line string suitable for the 'thinking' field of a training record.
     """
+    # Check manual overrides first (Milestone 2.4).
+    # style-specific: qoc checks _MANUAL_QOC only, all others check _MANUAL only.
+    key = _unit_key(unit)
+    if style == "qoc":
+        if key in _MANUAL_QOC:
+            return _MANUAL_QOC[key]
+    else:
+        if key in _MANUAL:
+            return _MANUAL[key]
+
     if style == "qoc":
         return _make_thinking_qoc(unit)
     # 'linear' is the default; any unknown style also falls back here.
@@ -670,6 +742,10 @@ def generate_from_repo(config) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
     """
     from scripts.repo.scan_repo import scan_repo  # local import to keep module testable
 
+    # Unconditionally load (or clear) manual overrides so each run reflects
+    # only the config's declared overrides — no leakage between runs (Milestone 2.4).
+    load_manual_overrides(getattr(config, "manual_overrides", None))
+
     units = scan_repo(config)
     units = _filter_units_by_config(units, config)
     units = _cap_units(units, config.target_records)
@@ -733,6 +809,9 @@ def main() -> None:
         or config.name in (".", "")
     ):
         sys.exit(f"Error: unsafe repo name for output path: {config.name!r}")
+
+    # Load (or clear) manual overrides for this run (Milestone 2.4).
+    load_manual_overrides(getattr(config, "manual_overrides", None))
 
     # Determine output directory
     if args.output_dir:
