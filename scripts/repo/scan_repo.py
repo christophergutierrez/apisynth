@@ -131,6 +131,26 @@ def _method_kind(node) -> str | None:
     return None
 
 
+def _is_property(node) -> bool:
+    """Return True iff any decorator on *node* is ``@property`` or ``@cached_property``.
+
+    Recognises:
+    - Bare ``ast.Name`` decorators: ``@property``, ``@cached_property``
+    - ``ast.Attribute`` decorators: ``@functools.cached_property``,
+      or any ``@x.property`` / ``@x.cached_property`` form.
+
+    ``ast.Call`` decorators (e.g. ``@property()``) are intentionally NOT
+    matched — they are unusual and do not represent standard property usage.
+    """
+    _PROPERTY_NAMES = frozenset({"property", "cached_property"})
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id in _PROPERTY_NAMES:
+            return True
+        if isinstance(dec, ast.Attribute) and dec.attr in _PROPERTY_NAMES:
+            return True
+    return False
+
+
 def _is_stub_body(node) -> bool:
     """Return True when a function/method body is a stub.
 
@@ -313,6 +333,10 @@ def _extract_units(tree: ast.AST, rel_str: str) -> List[Dict[str, Any]]:
                 kind = _method_kind(node)
                 if kind is not None:
                     unit["method_kind"] = kind
+                # Additive: only set is_property when decorated with @property or
+                # @cached_property; non-property method dicts carry no 'is_property' key.
+                if _is_property(node):
+                    unit["is_property"] = True
                 # Additive: only set is_stub when the body qualifies as a stub;
                 # non-stub units carry no 'is_stub' key.
                 if _is_stub_body(node):

@@ -237,6 +237,11 @@ def _is_classlevel_method(unit: Dict[str, Any]) -> bool:
     return unit.get("method_kind") in ("static", "class")
 
 
+def _is_property_unit(unit: Dict[str, Any]) -> bool:
+    """Return True when the unit is a property (is_property=True set by scanner)."""
+    return bool(unit.get("is_property"))
+
+
 def _linear_method(unit: Dict[str, Any]) -> str:
     """Linear trace for a method unit.
 
@@ -250,6 +255,25 @@ def _linear_method(unit: Dict[str, Any]) -> str:
     cls = unit.get("class") or ""  # guard against None and missing key
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     call = _call_form(unit)
+
+    # Property: takes precedence over static/class and instance branches.
+    if _is_property_unit(unit):
+        if cls:
+            return (
+                f"Entity: property {name} on class {cls}\n"
+                f"File: {location}{_doc_suffix(unit)}\n"
+                f"Scope: single unit — property (computed attribute)\n"
+                f"Use: instance.{name}  # property — attribute access, no parentheses (instance is a {cls})\n"
+                f"NOT: calling instance.{name}() — {name} is a property, accessed without ()"
+            )
+        else:
+            return (
+                f"Entity: property {name}\n"
+                f"File: {location}{_doc_suffix(unit)}\n"
+                f"Scope: single unit — property (computed attribute)\n"
+                f"Use: instance.{name}  # property — attribute access, no parentheses\n"
+                f"NOT: calling instance.{name}() — {name} is a property, accessed without ()"
+            )
 
     # Static/class methods: only emit class-level form when cls is known.
     if _is_classlevel_method(unit) and cls:
@@ -381,6 +405,25 @@ def _qoc_method(unit: Dict[str, Any]) -> str:
     cls = unit.get("class") or ""  # guard against None and missing key
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     call = _call_form(unit)
+
+    # Property: takes precedence over static/class and instance branches.
+    if _is_property_unit(unit):
+        if cls:
+            return (
+                f"Question: Should `{name}` be accessed as an attribute or called as a method?{_doc_suffix(unit)}\n"
+                f"Option A: access as attribute — instance.{name}  (property — no parentheses)\n"
+                f"Option B: call it — instance.{name}()  (incorrect — {name} is a property, not a method)\n"
+                f"Criteria: `{name}` is a property of `{cls}` at {location}. It is accessed as an attribute; Python computes it on access. Option A wins.\n"
+                f"NOT: calling instance.{name}() — it is a property, accessed without ()"
+            )
+        else:
+            return (
+                f"Question: Should `{name}` be accessed as an attribute or called as a method?{_doc_suffix(unit)}\n"
+                f"Option A: access as attribute — instance.{name}  (property — no parentheses)\n"
+                f"Option B: call it — instance.{name}()  (incorrect — {name} is a property, not a method)\n"
+                f"Criteria: `{name}` is a property at {location}. It is accessed as an attribute; Python computes it on access. Option A wins.\n"
+                f"NOT: calling instance.{name}() — it is a property, accessed without ()"
+            )
 
     # Static/class methods: only emit class-level form when cls is known.
     if _is_classlevel_method(unit) and cls:

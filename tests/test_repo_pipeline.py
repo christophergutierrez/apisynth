@@ -1106,3 +1106,236 @@ class TestBothFiltersInteraction:
         assert "__exit__" not in names, "__exit__ must be dropped by reject_trivial"
         assert "good_fn" in names
         assert "__init__" in names
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3.4: property access-form correctness
+# ---------------------------------------------------------------------------
+
+from scripts.repo.generate_from_code import (
+    _is_property_unit,
+    generate_code_thinking,
+)
+
+# Concrete property unit matching the real-world amesh example.
+_PROP_UNIT = {
+    "type": "method",
+    "name": "identity",
+    "class": "ResourceAgent",
+    "file": "x.py",
+    "lineno": 1,
+    "is_property": True,
+}
+
+# Same unit without a class key (classless edge case).
+_PROP_UNIT_NOCLASS = {
+    "type": "method",
+    "name": "identity",
+    "file": "x.py",
+    "lineno": 1,
+    "is_property": True,
+}
+
+# A static method unit — must NOT be hijacked by the property branch.
+_STATIC_UNIT = {
+    "type": "method",
+    "name": "create",
+    "class": "MyService",
+    "file": "svc.py",
+    "lineno": 5,
+    "method_kind": "static",
+    "signature": "create(url)",
+    "call_signature": "create(url)",
+}
+
+# A classmethod unit — must NOT be hijacked by the property branch.
+_CLASS_UNIT = {
+    "type": "method",
+    "name": "from_config",
+    "class": "MyService",
+    "file": "svc.py",
+    "lineno": 10,
+    "method_kind": "class",
+    "signature": "from_config(cls, cfg)",
+    "call_signature": "from_config(cfg)",
+}
+
+
+class TestIsPropertyUnit:
+    """Unit tests for the _is_property_unit predicate."""
+
+    def test_is_property_unit_true_when_flag_set(self):
+        assert _is_property_unit({"is_property": True}) is True
+
+    def test_is_property_unit_false_when_flag_missing(self):
+        assert _is_property_unit({"type": "method", "name": "x"}) is False
+
+    def test_is_property_unit_false_when_flag_false(self):
+        assert _is_property_unit({"is_property": False}) is False
+
+    def test_is_property_unit_false_for_plain_unit(self):
+        assert _is_property_unit(_STATIC_UNIT) is False
+        assert _is_property_unit(_CLASS_UNIT) is False
+
+
+class TestLinearPropertyTrace:
+    """_linear_method (via generate_code_thinking) uses attribute-access framing for properties."""
+
+    def test_property_trace_use_line_is_attribute_access(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="linear")
+        # The Use: line must be attribute access (no parentheses after name on that line)
+        use_line = next(ln for ln in trace.splitlines() if ln.startswith("Use:"))
+        assert "instance.identity" in use_line
+        assert "instance.identity(" not in use_line
+
+    def test_property_trace_mentions_property(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="linear")
+        assert "property" in trace
+
+    def test_property_trace_not_line_warns_against_calling(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="linear")
+        # The NOT line must warn against calling with ()
+        assert "NOT:" in trace
+        # The NOT line must reference the call form to warn against it
+        assert "identity()" in trace
+
+    def test_property_trace_contains_class_name(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="linear")
+        assert "ResourceAgent" in trace
+
+    def test_property_trace_unknown_class_no_literal_none(self):
+        trace = generate_code_thinking(_PROP_UNIT_NOCLASS, style="linear")
+        assert "None" not in trace
+        # The Use: line must be attribute access
+        use_line = next(ln for ln in trace.splitlines() if ln.startswith("Use:"))
+        assert "instance.identity" in use_line
+        assert "instance.identity(" not in use_line
+
+    def test_property_trace_unknown_class_still_uses_access_framing(self):
+        trace = generate_code_thinking(_PROP_UNIT_NOCLASS, style="linear")
+        assert "property" in trace
+        assert "NOT:" in trace
+
+
+class TestQocPropertyTrace:
+    """_qoc_method (via generate_code_thinking, style='qoc') uses attribute-access framing."""
+
+    def test_qoc_property_option_a_is_attribute_access(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="qoc")
+        # Option A line must be attribute access without parentheses after the name
+        option_a_line = next(ln for ln in trace.splitlines() if ln.startswith("Option A"))
+        assert "instance.identity" in option_a_line
+        assert "instance.identity(" not in option_a_line
+
+    def test_qoc_property_option_b_flags_call_as_incorrect(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="qoc")
+        # Option B must show the call form and flag it as incorrect
+        assert "Option B" in trace
+        assert "identity()" in trace
+        assert "incorrect" in trace
+
+    def test_qoc_property_not_line_warns_against_calling(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="qoc")
+        assert "NOT:" in trace
+        assert "identity()" in trace
+
+    def test_qoc_property_unknown_class_no_literal_none(self):
+        trace = generate_code_thinking(_PROP_UNIT_NOCLASS, style="qoc")
+        assert "None" not in trace
+        option_a_line = next(ln for ln in trace.splitlines() if ln.startswith("Option A"))
+        assert "instance.identity" in option_a_line
+        assert "instance.identity(" not in option_a_line
+
+    def test_qoc_property_contains_class_name_in_criteria(self):
+        trace = generate_code_thinking(_PROP_UNIT, style="qoc")
+        assert "ResourceAgent" in trace
+        assert "Criteria" in trace
+
+
+class TestPropertyRegressionStaticClass:
+    """Property branch must NOT hijack static or classmethod units."""
+
+    def test_static_method_still_renders_class_call_form_linear(self):
+        trace = generate_code_thinking(_STATIC_UNIT, style="linear")
+        # Static method must use ClassName.method() form
+        assert "MyService.create" in trace
+        assert "static method" in trace
+        # Must NOT use property framing
+        assert "attribute access" not in trace
+        assert "no parentheses" not in trace
+
+    def test_classmethod_still_renders_class_call_form_linear(self):
+        trace = generate_code_thinking(_CLASS_UNIT, style="linear")
+        assert "MyService.from_config" in trace
+        assert "classmethod" in trace
+        assert "attribute access" not in trace
+        assert "no parentheses" not in trace
+
+    def test_static_method_still_renders_class_call_form_qoc(self):
+        trace = generate_code_thinking(_STATIC_UNIT, style="qoc")
+        assert "MyService.create" in trace
+        assert "static method" in trace
+        assert "attribute access" not in trace
+
+    def test_classmethod_still_renders_class_call_form_qoc(self):
+        trace = generate_code_thinking(_CLASS_UNIT, style="qoc")
+        assert "MyService.from_config" in trace
+        assert "classmethod" in trace
+        assert "attribute access" not in trace
+
+
+class TestPropertyEndToEnd:
+    """End-to-end: scan a temp repo with a @property and check generated trace."""
+
+    def test_property_unit_e2e_linear_trace(self, tmp_path):
+        """Scanning a @property method produces a record whose thinking uses access framing."""
+        (tmp_path / "agents.py").write_text(
+            "class ResourceAgent:\n"
+            "    @property\n"
+            "    def identity(self):\n"
+            "        return id(self)\n"
+        )
+
+        from scripts.repo.loader import RepoConfig
+        from scripts.repo.scan_repo import scan_repo as _scan_repo
+        from scripts.repo.generate_from_code import generate_code_thinking
+
+        config = RepoConfig(name="e2e-prop", path=str(tmp_path))
+        units = _scan_repo(config)
+        prop_units = [u for u in units if u.get("is_property") and u["name"] == "identity"]
+        assert prop_units, "Expected a property unit for 'identity'"
+        unit = prop_units[0]
+        assert unit.get("is_property") is True
+
+        trace = generate_code_thinking(unit, style="linear")
+        # The Use: line must be attribute access (no call-form on the use line)
+        use_line = next(ln for ln in trace.splitlines() if ln.startswith("Use:"))
+        assert "instance.identity" in use_line
+        assert "instance.identity(" not in use_line
+        assert "property" in trace
+
+    def test_property_unit_e2e_qoc_trace(self, tmp_path):
+        """QOC trace for a scanned @property uses attribute-access framing."""
+        (tmp_path / "agents.py").write_text(
+            "class ResourceAgent:\n"
+            "    @property\n"
+            "    def identity(self):\n"
+            "        return id(self)\n"
+        )
+
+        from scripts.repo.loader import RepoConfig
+        from scripts.repo.scan_repo import scan_repo as _scan_repo
+        from scripts.repo.generate_from_code import generate_code_thinking
+
+        config = RepoConfig(name="e2e-prop-qoc", path=str(tmp_path))
+        units = _scan_repo(config)
+        prop_units = [u for u in units if u.get("is_property") and u["name"] == "identity"]
+        assert prop_units
+        unit = prop_units[0]
+
+        trace = generate_code_thinking(unit, style="qoc")
+        # Option A line must be attribute access
+        option_a_line = next(ln for ln in trace.splitlines() if ln.startswith("Option A"))
+        assert "instance.identity" in option_a_line
+        assert "instance.identity(" not in option_a_line
+        assert "incorrect" in trace  # Option B flags the call as incorrect
