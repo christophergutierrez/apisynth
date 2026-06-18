@@ -7,17 +7,24 @@ Scores predictions against a holdout set on three independent tiers:
   Tier 2 — param_f1:   F1 over parameter names (precision + recall)
   Tier 3 — executable: optional live API validation (requires --executable flag)
 
+Phase-3 code records are also supported (--mode code / --mode auto).
+
 Usage:
     python scripts/eval.py \\
         --predictions data/<vendor>/<endpoint>/holdout.jsonl \\
         --holdout     data/<vendor>/<endpoint>/holdout.jsonl \\
         [--executable --config apis/<vendor>/<endpoint>/config.yaml]
+    python scripts/eval.py \\
+        --predictions data/repos/<repo>/holdout.jsonl \\
+        --holdout     data/repos/<repo>/holdout.jsonl \\
+        --mode code [--check-signature]
 
 When --predictions and --holdout are the same file the score is a self-
-consistency check (should be 1.0 for format and param_f1).
+consistency check (should be 1.0 for format and param_f1 / field_accuracy).
 """
 
 import argparse
+import ast
 import json
 import sys
 import urllib.error
@@ -174,6 +181,155 @@ def _band(score: float) -> str:
     return "FAIL"
 
 
+# ── Code-unit evaluation (Phase 3, additive / opt-in) ─────────────────────
+#
+# Mirrors the 3-tier rubric for API calls, adapted for code-unit output dicts.
+# The wrap-as-def contract for signature validation mirrors the form pinned in
+# generate_from_code.py milestone 3.2 (_signature_well_formed).
+
+_CODE_UNIT_TYPES = frozenset({"function", "method", "class", "api_call"})
+_CODE_REQUIRED_KEYS = frozenset({"unit", "name", "file", "signature"})
+
+
+def code_format_score(output: object) -> float:
+    """Return 1.0 iff output is a well-formed code-unit dict, 0.0 otherwise.
+
+    Requires output to be a dict with keys 'unit', 'name', 'file', 'signature'
+    where 'unit' is one of {function, method, class, api_call} and name/file/
+    signature are non-empty strings.  If the optional 'class' key is present it
+    must be a string.
+    """
+    if not isinstance(output, dict):
+        return 0.0
+    if not _CODE_REQUIRED_KEYS.issubset(output.keys()):
+        return 0.0
+    if output["unit"] not in _CODE_UNIT_TYPES:
+        return 0.0
+    for key in ("name", "file", "signature"):
+        if not isinstance(output[key], str) or not output[key]:
+            return 0.0
+    if "class" in output and not isinstance(output["class"], str):
+        return 0.0
+    return 1.0
+
+
+def code_field_accuracy(predicted: object, expected: dict) -> dict:
+    """Compute exact-match field accuracy between predicted and expected outputs.
+
+    Always compares: unit, name, file, signature.
+    Also compares 'class' when expected has a truthy 'class' key.
+
+    Returns a dict with per-field boolean matches (e.g. 'unit_match'), a
+    computed 'field_accuracy' = (matching fields) / (compared fields) rounded
+    to 4 decimal places, and the per-field boolean values.
+    """
+    always_fields = ("unit", "name", "file", "signature")
+
+    if not isinstance(predicted, dict):
+        result: dict = {f"{k}_match": False for k in always_fields}
+        if expected.get("class"):
+            result["class_match"] = False
+        result["field_accuracy"] = 0.0
+        return result
+
+    fields = list(always_fields)
+    if expected.get("class"):
+        fields.append("class")
+
+    matches = {f"{k}_match": (predicted.get(k) == expected.get(k)) for k in fields}
+    accuracy = sum(matches.values()) / len(fields)
+    return {**matches, "field_accuracy": round(accuracy, 4)}
+
+
+def code_signature_valid(output: object) -> bool | None:
+    """Return True if the predicted output's signature is well-formed, else False.
+
+    Validation form depends on the unit kind:
+      - ``api_call`` units carry a *call-site* form (e.g.
+        ``requests.get(url, **kwargs)``) — a dotted name with call arguments,
+        which is NOT a definition. These are validated as expressions
+        (``ast.parse(sig)``); wrapping them as ``def {sig}: pass`` would
+        spuriously fail on the dotted receiver and penalise valid api_calls.
+      - all other units carry definition-style fragments validated via the
+        wrap-as-def form ``def {sig}: pass`` — the contract pinned in
+        generate_from_code._signature_well_formed (milestone 3.2).
+
+    Returns None when output is not a dict or has no non-empty 'signature' key
+    (absence is not a malformation).
+    """
+    if not isinstance(output, dict):
+        return None
+    sig = output.get("signature")
+    if not isinstance(sig, str) or not sig:
+        return None
+    try:
+        if output.get("unit") == "api_call":
+            ast.parse(sig)
+        else:
+            ast.parse(f"def {sig}: pass")
+        return True
+    except (SyntaxError, ValueError, TypeError):
+        return False
+
+
+def score_code_record(
+    predicted_output: object,
+    expected_output: dict,
+    check_signature: bool = False,
+) -> dict:
+    """Score a single code-unit prediction against the expected output.
+
+    Tiers:
+      1. code_format_score  — structural validity (always run)
+      2. code_field_accuracy — exact-match per field (skipped on format fail)
+      3. code_signature_valid — AST well-formedness (only when check_signature=True)
+
+    Composite = mean of available tiers; banded via _band (reused as-is).
+    """
+    fmt = code_format_score(predicted_output)
+
+    always_fields = ("unit", "name", "file", "signature")
+    if fmt == 0.0 or not isinstance(predicted_output, dict):
+        field_booleans = {f"{k}_match": False for k in always_fields}
+        if isinstance(expected_output, dict) and expected_output.get("class"):
+            field_booleans["class_match"] = False
+        field_acc = 0.0
+        sig_valid: bool | None = False if check_signature else None
+    else:
+        fa_dict = code_field_accuracy(predicted_output, expected_output)
+        field_acc = fa_dict["field_accuracy"]
+        field_booleans = {k: v for k, v in fa_dict.items() if k != "field_accuracy"}
+        sig_valid = code_signature_valid(predicted_output) if check_signature else None
+
+    composite = (fmt + field_acc) / 2
+    if sig_valid is not None:
+        composite = (fmt + field_acc + (1.0 if sig_valid else 0.0)) / 3
+
+    band = _band(round(composite, 4))
+
+    return {
+        "format_score": fmt,
+        "field_accuracy": round(field_acc, 4),
+        **field_booleans,
+        "signature_valid": sig_valid,
+        "composite_score": round(composite, 4),
+        "band": band,
+    }
+
+
+def _is_code_record(record: dict) -> bool:
+    """Return True if record should be evaluated as a code record.
+
+    Criteria: record has type == "code", OR has an "output" dict without
+    an "api_call" key.
+    """
+    if record.get("type") == "code":
+        return True
+    if isinstance(record.get("output"), dict) and "api_call" not in record:
+        return True
+    return False
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def load_records(path: Path) -> list[dict]:
@@ -193,11 +349,16 @@ def main():
     parser.add_argument("--holdout", required=True, type=Path,
                         help="JSONL holdout file with ground-truth api_call fields")
     parser.add_argument("--executable", action="store_true",
-                        help="Also run Tier 3 live API validation (requires --config)")
+                        help="Also run Tier 3 live API validation (requires --config). API path only.")
     parser.add_argument("--config", type=Path,
-                        help="config.yaml for Tier 3 validation")
+                        help="config.yaml for Tier 3 validation (API path only)")
     parser.add_argument("--output", type=Path,
                         help="Write scored records to this JSONL file")
+    parser.add_argument("--mode", choices=["auto", "api", "code"], default="auto",
+                        help="Scoring mode: 'api' for Phase-2 api_call records, 'code' for Phase-3 "
+                             "code-unit records, 'auto' to dispatch per record (default: auto)")
+    parser.add_argument("--check-signature", action="store_true",
+                        help="Code path: run Tier-3 AST signature well-formedness check (offline)")
     args = parser.parse_args()
 
     cfg = None
@@ -219,34 +380,78 @@ def main():
         print(f"Warning: predictions ({len(preds)}) and holdout ({len(holdout)}) have different lengths.")
         print("Scoring up to min(len).")
 
-    results = []
-    for pred, gold in zip(preds, holdout):
-        scored = score_record(
-            pred.get("api_call"),
-            gold.get("api_call", {}),
-            cfg=cfg,
-            token=token,
-            run_executable=args.executable,
-        )
-        scored["question"] = pred.get("question", "")
-        scored["conventions_tested"] = gold.get("conventions_tested", [])
-        results.append(scored)
+    api_results = []
+    code_results = []
 
-    # Summary
-    n = len(results)
-    avg_fmt = sum(r["format_score"] for r in results) / n
-    avg_f1 = sum(r["param_f1"] for r in results) / n
-    avg_comp = sum(r["composite_score"] for r in results) / n
-    bands = {}
-    for r in results:
-        bands[r["band"]] = bands.get(r["band"], 0) + 1
+    for pred, gold in zip(preds, holdout):
+        # Determine which path to use for this record.
+        if args.mode == "api":
+            use_code = False
+        elif args.mode == "code":
+            use_code = True
+        else:  # auto
+            use_code = _is_code_record(gold)
+
+        if use_code:
+            scored = score_code_record(
+                pred.get("output"),
+                gold.get("output", {}),
+                check_signature=args.check_signature,
+            )
+            scored["question"] = pred.get("question", "")
+            code_results.append(scored)
+        else:
+            scored = score_record(
+                pred.get("api_call"),
+                gold.get("api_call", {}),
+                cfg=cfg,
+                token=token,
+                run_executable=args.executable,
+            )
+            scored["question"] = pred.get("question", "")
+            scored["conventions_tested"] = gold.get("conventions_tested", [])
+            api_results.append(scored)
+
+    results = api_results + code_results
+
+    if not results:
+        print("No records to evaluate.")
+        return
 
     print(f"\n{'─'*50}")
-    print(f"Records evaluated:  {n}")
-    print(f"Avg format score:   {avg_fmt:.3f}")
-    print(f"Avg param F1:       {avg_f1:.3f}")
-    print(f"Avg composite:      {avg_comp:.3f}")
-    print(f"Band distribution:  {bands}")
+
+    # API summary
+    if api_results:
+        n = len(api_results)
+        avg_fmt = sum(r["format_score"] for r in api_results) / n
+        avg_f1 = sum(r["param_f1"] for r in api_results) / n
+        avg_comp = sum(r["composite_score"] for r in api_results) / n
+        bands: dict = {}
+        for r in api_results:
+            bands[r["band"]] = bands.get(r["band"], 0) + 1
+        print(f"API records evaluated: {n}")
+        print(f"Avg format score:      {avg_fmt:.3f}")
+        print(f"Avg param F1:          {avg_f1:.3f}")
+        print(f"Avg composite:         {avg_comp:.3f}")
+        print(f"Band distribution:     {bands}")
+
+    # Code summary
+    if code_results:
+        if api_results:
+            print()
+        n = len(code_results)
+        avg_fmt = sum(r["format_score"] for r in code_results) / n
+        avg_fa = sum(r["field_accuracy"] for r in code_results) / n
+        avg_comp = sum(r["composite_score"] for r in code_results) / n
+        bands = {}
+        for r in code_results:
+            bands[r["band"]] = bands.get(r["band"], 0) + 1
+        print(f"Code records evaluated: {n}")
+        print(f"Avg format score:       {avg_fmt:.3f}")
+        print(f"Avg field accuracy:     {avg_fa:.3f}")
+        print(f"Avg composite:          {avg_comp:.3f}")
+        print(f"Band distribution:      {bands}")
+
     print(f"{'─'*50}")
 
     if args.output:

@@ -628,3 +628,337 @@ def test_path_only_config_unchanged_behavior():
         names = {u["name"] for u in units}
         assert "hello" in names
         assert "World" in names
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3.3: is_stub detection in scan_repo
+# ---------------------------------------------------------------------------
+
+from scripts.repo.scan_repo import _is_stub_body
+import ast as _ast
+
+
+def _parse_func(src: str):
+    """Parse src as a module and return the first FunctionDef node."""
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            return node
+    raise AssertionError(f"No function found in: {src!r}")
+
+
+class TestIsStubBody:
+    """Unit tests for the _is_stub_body helper."""
+
+    def test_pass_body_is_stub(self):
+        node = _parse_func("def f(): pass")
+        assert _is_stub_body(node) is True
+
+    def test_ellipsis_body_is_stub(self):
+        node = _parse_func("def f(): ...")
+        assert _is_stub_body(node) is True
+
+    def test_raise_not_implemented_bare_is_stub(self):
+        node = _parse_func("def f(): raise NotImplementedError")
+        assert _is_stub_body(node) is True
+
+    def test_raise_not_implemented_call_is_stub(self):
+        node = _parse_func("def f(): raise NotImplementedError('not yet')")
+        assert _is_stub_body(node) is True
+
+    def test_docstring_only_is_stub(self):
+        src = 'def f():\n    """Docstring only."""\n'
+        node = _parse_func(src)
+        assert _is_stub_body(node) is True
+
+    def test_docstring_then_pass_is_stub(self):
+        src = 'def f():\n    """Docstring."""\n    pass\n'
+        node = _parse_func(src)
+        assert _is_stub_body(node) is True
+
+    def test_docstring_then_ellipsis_is_stub(self):
+        src = 'def f():\n    """Docstring."""\n    ...\n'
+        node = _parse_func(src)
+        assert _is_stub_body(node) is True
+
+    def test_docstring_then_raise_is_stub(self):
+        src = 'def f():\n    """Docstring."""\n    raise NotImplementedError\n'
+        node = _parse_func(src)
+        assert _is_stub_body(node) is True
+
+    def test_real_body_is_not_stub(self):
+        node = _parse_func("def f(x): return x + 1")
+        assert _is_stub_body(node) is False
+
+    def test_assignment_body_is_not_stub(self):
+        node = _parse_func("def f():\n    x = 1\n    return x\n")
+        assert _is_stub_body(node) is False
+
+    def test_raise_other_exception_is_not_stub(self):
+        node = _parse_func("def f(): raise ValueError('bad')")
+        assert _is_stub_body(node) is False
+
+
+class TestScanRepoIsStubKey:
+    """Integration: scan_repo sets is_stub ONLY on qualifying units."""
+
+    def test_pass_method_gets_is_stub(self, tmp_path):
+        (tmp_path / "stubs.py").write_text(
+            "class A:\n"
+            "    def stub_method(self): pass\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        stub_m = next(u for u in units if u["name"] == "stub_method")
+        assert stub_m.get("is_stub") is True
+
+    def test_ellipsis_function_gets_is_stub(self, tmp_path):
+        (tmp_path / "stubs.py").write_text("def stub_fn(): ...\n")
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        stub_f = next(u for u in units if u["name"] == "stub_fn")
+        assert stub_f.get("is_stub") is True
+
+    def test_raise_not_implemented_method_gets_is_stub(self, tmp_path):
+        (tmp_path / "stubs.py").write_text(
+            "class B:\n"
+            "    def abstract_method(self):\n"
+            "        raise NotImplementedError\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        m = next(u for u in units if u["name"] == "abstract_method")
+        assert m.get("is_stub") is True
+
+    def test_docstring_only_method_gets_is_stub(self, tmp_path):
+        (tmp_path / "stubs.py").write_text(
+            'class C:\n'
+            '    def doc_only(self):\n'
+            '        """Docstring only."""\n'
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        m = next(u for u in units if u["name"] == "doc_only")
+        assert m.get("is_stub") is True
+
+    def test_real_body_function_has_no_is_stub_key(self, tmp_path):
+        (tmp_path / "real.py").write_text("def compute(x): return x * 2\n")
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        f = next(u for u in units if u["name"] == "compute")
+        assert "is_stub" not in f, "Non-stub unit must NOT carry is_stub key"
+
+    def test_real_body_method_has_no_is_stub_key(self, tmp_path):
+        (tmp_path / "real.py").write_text(
+            "class D:\n"
+            "    def do_work(self, x):\n"
+            "        return x + 1\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        m = next(u for u in units if u["name"] == "do_work")
+        assert "is_stub" not in m, "Non-stub method must NOT carry is_stub key"
+
+    def test_class_unit_never_has_is_stub(self, tmp_path):
+        (tmp_path / "cls.py").write_text("class MyClass: pass\n")
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        cls_unit = next(u for u in units if u["type"] == "class")
+        assert "is_stub" not in cls_unit
+
+    def test_api_call_unit_never_has_is_stub(self, tmp_path):
+        (tmp_path / "api.py").write_text(
+            "import requests\n"
+            "def fetch():\n"
+            "    requests.get('https://example.com')\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        api_units = [u for u in units if u["type"] == "api_call"]
+        assert api_units, "Expected at least one api_call unit"
+        for u in api_units:
+            assert "is_stub" not in u
+
+    def test_scan_repo_still_returns_all_units_including_stubs(self, tmp_path):
+        """scan_repo must NOT filter — all units are returned regardless of is_stub."""
+        (tmp_path / "mixed.py").write_text(
+            "def real(x): return x\n"
+            "def stub(): pass\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        names = {u["name"] for u in units}
+        assert "real" in names
+        assert "stub" in names
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3.4: is_property detection in scan_repo
+# ---------------------------------------------------------------------------
+
+from scripts.repo.scan_repo import _is_property as _scan_is_property
+
+
+class TestIsProperty:
+    """Unit tests for the _is_property helper."""
+
+    def _parse_method(self, src: str):
+        """Parse src as a module and return the first method (FunctionDef in a class)."""
+        import ast as _ast
+        tree = _ast.parse(src)
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ClassDef):
+                for child in node.body:
+                    if isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                        return child
+        raise AssertionError(f"No method found in: {src!r}")
+
+    def test_bare_property_decorator_is_property(self):
+        node = self._parse_method(
+            "class A:\n"
+            "    @property\n"
+            "    def val(self): return 42\n"
+        )
+        assert _scan_is_property(node) is True
+
+    def test_bare_cached_property_decorator_is_property(self):
+        node = self._parse_method(
+            "class A:\n"
+            "    @cached_property\n"
+            "    def val(self): return 42\n"
+        )
+        assert _scan_is_property(node) is True
+
+    def test_attribute_functools_cached_property_is_property(self):
+        node = self._parse_method(
+            "import functools\n"
+            "class A:\n"
+            "    @functools.cached_property\n"
+            "    def val(self): return 42\n"
+        )
+        assert _scan_is_property(node) is True
+
+    def test_attribute_property_form_is_property(self):
+        """@x.property counts as a property decorator."""
+        node = self._parse_method(
+            "class A:\n"
+            "    @something.property\n"
+            "    def val(self): return 42\n"
+        )
+        assert _scan_is_property(node) is True
+
+    def test_plain_method_no_decorators_not_property(self):
+        node = self._parse_method(
+            "class A:\n"
+            "    def val(self): return 42\n"
+        )
+        assert _scan_is_property(node) is False
+
+    def test_staticmethod_decorator_not_property(self):
+        node = self._parse_method(
+            "class A:\n"
+            "    @staticmethod\n"
+            "    def val(): return 42\n"
+        )
+        assert _scan_is_property(node) is False
+
+    def test_classmethod_decorator_not_property(self):
+        node = self._parse_method(
+            "class A:\n"
+            "    @classmethod\n"
+            "    def val(cls): return 42\n"
+        )
+        assert _scan_is_property(node) is False
+
+    def test_call_decorator_not_property(self):
+        """ast.Call decorators (e.g. @property()) are NOT matched."""
+        node = self._parse_method(
+            "class A:\n"
+            "    @property()\n"
+            "    def val(self): return 42\n"
+        )
+        assert _scan_is_property(node) is False
+
+
+class TestScanRepoIsPropertyKey:
+    """Integration: scan_repo sets is_property ONLY on qualifying method units."""
+
+    def test_property_method_gets_is_property(self, tmp_path):
+        (tmp_path / "props.py").write_text(
+            "class A:\n"
+            "    @property\n"
+            "    def identity(self): return self\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        prop_m = next(u for u in units if u["name"] == "identity")
+        assert prop_m.get("is_property") is True
+
+    def test_cached_property_method_gets_is_property(self, tmp_path):
+        (tmp_path / "props.py").write_text(
+            "from functools import cached_property\n"
+            "class A:\n"
+            "    @cached_property\n"
+            "    def expensive(self): return 'result'\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        prop_m = next(u for u in units if u["name"] == "expensive")
+        assert prop_m.get("is_property") is True
+
+    def test_functools_cached_property_attribute_form_gets_is_property(self, tmp_path):
+        (tmp_path / "props.py").write_text(
+            "import functools\n"
+            "class A:\n"
+            "    @functools.cached_property\n"
+            "    def lazy(self): return 'lazy'\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        prop_m = next(u for u in units if u["name"] == "lazy")
+        assert prop_m.get("is_property") is True
+
+    def test_normal_method_has_no_is_property_key(self, tmp_path):
+        (tmp_path / "real.py").write_text(
+            "class B:\n"
+            "    def do_work(self, x): return x + 1\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        m = next(u for u in units if u["name"] == "do_work")
+        assert "is_property" not in m, "Non-property method must NOT carry is_property key"
+
+    def test_is_property_does_not_leak_to_top_level_function(self, tmp_path):
+        """@property on a top-level function: scanner does not set is_property on functions."""
+        (tmp_path / "weird.py").write_text(
+            "@property\n"
+            "def top_level_prop(): pass\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        fn = next((u for u in units if u["name"] == "top_level_prop"), None)
+        assert fn is not None
+        assert fn["type"] == "function"
+        assert "is_property" not in fn, "is_property must NOT be set on top-level functions"
+
+    def test_is_property_does_not_leak_to_class_unit(self, tmp_path):
+        (tmp_path / "cls.py").write_text(
+            "class MyClass: pass\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        cls_unit = next(u for u in units if u["type"] == "class")
+        assert "is_property" not in cls_unit
+
+    def test_is_property_does_not_leak_to_api_call_unit(self, tmp_path):
+        (tmp_path / "api.py").write_text(
+            "import requests\n"
+            "def fetch():\n"
+            "    requests.get('https://example.com')\n"
+        )
+        config = _make_config(tmp_path)
+        units = scan_repo(config)
+        api_units = [u for u in units if u["type"] == "api_call"]
+        assert api_units, "Expected at least one api_call unit"
+        for u in api_units:
+            assert "is_property" not in u

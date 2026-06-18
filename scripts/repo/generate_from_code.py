@@ -29,11 +29,12 @@ Usage:
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Ensure the repo root is on sys.path so that `scripts.*` imports work
 # regardless of the working directory when this file is executed directly.
@@ -236,6 +237,11 @@ def _is_classlevel_method(unit: Dict[str, Any]) -> bool:
     return unit.get("method_kind") in ("static", "class")
 
 
+def _is_property_unit(unit: Dict[str, Any]) -> bool:
+    """Return True when the unit is a property (is_property=True set by scanner)."""
+    return bool(unit.get("is_property"))
+
+
 def _linear_method(unit: Dict[str, Any]) -> str:
     """Linear trace for a method unit.
 
@@ -249,6 +255,25 @@ def _linear_method(unit: Dict[str, Any]) -> str:
     cls = unit.get("class") or ""  # guard against None and missing key
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     call = _call_form(unit)
+
+    # Property: takes precedence over static/class and instance branches.
+    if _is_property_unit(unit):
+        if cls:
+            return (
+                f"Entity: property {name} on class {cls}\n"
+                f"File: {location}{_doc_suffix(unit)}\n"
+                f"Scope: single unit — property (computed attribute)\n"
+                f"Use: instance.{name}  # property — attribute access, no parentheses (instance is a {cls})\n"
+                f"NOT: calling instance.{name}() — {name} is a property, accessed without ()"
+            )
+        else:
+            return (
+                f"Entity: property {name}\n"
+                f"File: {location}{_doc_suffix(unit)}\n"
+                f"Scope: single unit — property (computed attribute)\n"
+                f"Use: instance.{name}  # property — attribute access, no parentheses\n"
+                f"NOT: calling instance.{name}() — {name} is a property, accessed without ()"
+            )
 
     # Static/class methods: only emit class-level form when cls is known.
     if _is_classlevel_method(unit) and cls:
@@ -380,6 +405,25 @@ def _qoc_method(unit: Dict[str, Any]) -> str:
     cls = unit.get("class") or ""  # guard against None and missing key
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     call = _call_form(unit)
+
+    # Property: takes precedence over static/class and instance branches.
+    if _is_property_unit(unit):
+        if cls:
+            return (
+                f"Question: Should `{name}` be accessed as an attribute or called as a method?{_doc_suffix(unit)}\n"
+                f"Option A: access as attribute — instance.{name}  (property — no parentheses)\n"
+                f"Option B: call it — instance.{name}()  (incorrect — {name} is a property, not a method)\n"
+                f"Criteria: `{name}` is a property of `{cls}` at {location}. It is accessed as an attribute; Python computes it on access. Option A wins.\n"
+                f"NOT: calling instance.{name}() — it is a property, accessed without ()"
+            )
+        else:
+            return (
+                f"Question: Should `{name}` be accessed as an attribute or called as a method?{_doc_suffix(unit)}\n"
+                f"Option A: access as attribute — instance.{name}  (property — no parentheses)\n"
+                f"Option B: call it — instance.{name}()  (incorrect — {name} is a property, not a method)\n"
+                f"Criteria: `{name}` is a property at {location}. It is accessed as an attribute; Python computes it on access. Option A wins.\n"
+                f"NOT: calling instance.{name}() — it is a property, accessed without ()"
+            )
 
     # Static/class methods: only emit class-level form when cls is known.
     if _is_classlevel_method(unit) and cls:
@@ -702,23 +746,116 @@ def _in_holdout(unit: Dict[str, Any], holdout_ratio: float) -> bool:
     return value < holdout_ratio
 
 
+def _stratified_unit_key(unit: Dict[str, Any]) -> Tuple[str, str, str, str, Any]:
+    """Return a stable per-unit identity for stratified holdout membership.
+
+    The bare ``(type, file, name)`` triple is NOT unique: same-named methods in
+    different classes within one file (e.g. ``A.foo`` and ``B.foo``) collapse to
+    the same triple, so designating one for holdout would drag every sibling
+    along — breaking the exact per-stratum ratio and leaking related units
+    across the split. Including ``class`` and ``lineno`` (the scanner sets
+    ``lineno`` on every unit, and two defs cannot start on the same line)
+    disambiguates them so each unit is split independently. ``class``/``lineno``
+    are read leniently (``"" `` / ``None``) so hand-built units without them
+    still produce a well-formed key.
+    """
+    return (
+        unit.get("type", ""),
+        unit["file"],
+        unit["name"],
+        unit.get("class") or "",
+        unit.get("lineno"),
+    )
+
+
+def _stratified_holdout_keys(
+    units: List[Dict[str, Any]], holdout_ratio: float
+) -> Set[Tuple[str, str, str, str, Any]]:
+    """Return a set of per-unit keys that belong to holdout under stratified split.
+
+    Groups units by their 'type' field, then within each group sorts by
+    SHA-256 hex digest of "<file>:<name>" (stable across processes — never
+    uses builtin hash()). The first k = round(holdout_ratio * n) units in
+    sorted order are designated holdout, guaranteeing ~holdout_ratio holdout
+    within EACH type stratum.
+
+    k uses banker's rounding (Python ``round``), e.g. n=105, ratio 0.20 → k=21.
+
+    Keys are the per-unit identity ``(type, file, name, class, lineno)`` from
+    _stratified_unit_key (NOT the bare "<file>:<name>" string used by the "hash"
+    path). This keeps the per-type guarantee EXACT even when units share a
+    type+file:name (same-named methods on different classes) — each unit is held
+    out independently, so a type's holdout is exactly round(ratio*n).
+
+    Args:
+        units:         List of scanner unit dicts with at minimum 'type',
+                       'file', 'name'.
+        holdout_ratio: Desired fraction of each type to hold out (0.0–1.0).
+
+    Returns:
+        Set of (type, file, name, class, lineno) tuples assigned to holdout.
+    """
+    # Group by type, preserving arbitrary input order within each group.
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for unit in units:
+        unit_type = unit.get("type", "")
+        groups.setdefault(unit_type, []).append(unit)
+
+    holdout_keys: Set[Tuple[str, str, str, str, Any]] = set()
+    for _type, group in groups.items():
+        n = len(group)
+        k = round(holdout_ratio * n)
+        # Sort within group by SHA-256 of "<file>:<name>" hex string — deterministic,
+        # process-independent (no salted builtin hash()).
+        sorted_group = sorted(
+            group,
+            key=lambda u: hashlib.sha256(
+                f"{u['file']}:{u['name']}".encode()
+            ).hexdigest(),
+        )
+        for unit in sorted_group[:k]:
+            holdout_keys.add(_stratified_unit_key(unit))
+
+    return holdout_keys
+
+
 def _split_records(
-    units: List[Dict[str, Any]], holdout_ratio: float, style: str = "linear"
+    units: List[Dict[str, Any]],
+    holdout_ratio: float,
+    style: str = "linear",
+    strategy: str = "hash",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Partition units into (train, holdout) records deterministically.
 
     The `style` arg ("linear" default, or "qoc") is threaded into _make_record
     so the production path (main()/generate_from_repo) honors thinking_style.
+
+    The `strategy` arg controls how units are assigned to holdout:
+      "hash"       (default) — per-unit SHA-256 threshold; preserves exact
+                   existing behaviour for all callers that omit the arg.
+      "stratified" — group by unit type, sort by hash within each group, and
+                   take the first round(holdout_ratio * n) per group; guarantees
+                   ~holdout_ratio holdout within EACH type stratum.
     """
     train_records: List[Dict[str, Any]] = []
     holdout_records: List[Dict[str, Any]] = []
 
-    for unit in units:
-        record = _make_record(unit, style=style)
-        if _in_holdout(unit, holdout_ratio):
-            holdout_records.append(record)
-        else:
-            train_records.append(record)
+    if strategy == "stratified":
+        holdout_keys = _stratified_holdout_keys(units, holdout_ratio)
+        for unit in units:
+            record = _make_record(unit, style=style)
+            if _stratified_unit_key(unit) in holdout_keys:
+                holdout_records.append(record)
+            else:
+                train_records.append(record)
+    else:
+        # "hash" strategy: original per-unit threshold path (byte-identical to prior).
+        for unit in units:
+            record = _make_record(unit, style=style)
+            if _in_holdout(unit, holdout_ratio):
+                holdout_records.append(record)
+            else:
+                train_records.append(record)
 
     return train_records, holdout_records
 
@@ -759,6 +896,100 @@ def _cap_units(units: List[Dict[str, Any]], target_records: int) -> List[Dict[st
         units,
         key=lambda u: hashlib.sha256(f"{u['file']}:{u['name']}".encode()).hexdigest(),
     )[:target_records]
+
+
+# ---------------------------------------------------------------------------
+# Syntax validation helpers (Milestone 3.2)
+# ---------------------------------------------------------------------------
+
+def _signature_well_formed(sig) -> bool:
+    """Return True when sig is a valid definition-style signature fragment.
+
+    Validation form: wrap as ``def {sig}: pass`` and attempt ``ast.parse``.
+    This is the correct form because scanner-emitted signatures are
+    definition-style fragments (e.g. ``f(obj: Any)``, ``f(*, k: str)``,
+    ``Foo(x: int)``) rather than call expressions.
+
+    - If sig is None, empty, or not a str → return True (absence of a
+      signature is not a malformation; nothing to reject on).
+    - If ast.parse succeeds → True.
+    - If SyntaxError, ValueError, or TypeError is raised → False.
+    """
+    if not isinstance(sig, str) or not sig:
+        return True
+    try:
+        ast.parse(f"def {sig}: pass")
+        return True
+    except (SyntaxError, ValueError, TypeError):
+        return False
+
+
+def _unit_syntax_ok(unit: Dict[str, Any]) -> bool:
+    """Return True iff both scanner-provided signature fields are well-formed.
+
+    Only validates 'signature' and 'call_signature' (the real scanner fields).
+    Missing keys pass — absence of a field is not a malformation. Does NOT
+    validate the synthesised stub from _signature_for (the ``name(...)``
+    placeholder is intentional and ``def name(...): pass`` is invalid).
+    """
+    return (
+        _signature_well_formed(unit.get("signature"))
+        and _signature_well_formed(unit.get("call_signature"))
+    )
+
+
+def _filter_invalid_syntax(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return units whose scanner-provided signatures are syntactically valid.
+
+    Preserves input order (deterministic). Units with no signature fields pass.
+    """
+    return [u for u in units if _unit_syntax_ok(u)]
+
+
+# ---------------------------------------------------------------------------
+# Trivial-unit rejection (Milestone 3.3)
+# ---------------------------------------------------------------------------
+
+_DUNDER_KEEP: frozenset = frozenset({"__init__"})
+
+
+def _is_dunder_name(name) -> bool:
+    """Return True iff name is a dunder (e.g. __enter__, __repr__).
+
+    A dunder name starts and ends with '__' and has length > 4 (i.e. at least
+    one character between the double-underscores on each side).
+    """
+    return (
+        isinstance(name, str)
+        and len(name) > 4
+        and name.startswith("__")
+        and name.endswith("__")
+    )
+
+
+def _is_trivial_unit(unit: Dict[str, Any]) -> bool:
+    """Return True when a function/method unit should be rejected as trivial.
+
+    Only considers units of type 'function' or 'method'. Classes and api_calls
+    are never trivial regardless of name.
+
+    A unit is trivial when:
+      - its body is a stub (is_stub=True was set by the scanner), OR
+      - its name is a dunder other than __init__ (e.g. __enter__, __repr__).
+    """
+    if unit.get("type") not in ("function", "method"):
+        return False
+    if unit.get("is_stub"):
+        return True
+    name = unit.get("name")
+    if _is_dunder_name(name) and name not in _DUNDER_KEEP:
+        return True
+    return False
+
+
+def _filter_trivial_units(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return units that are not trivial, preserving input order."""
+    return [u for u in units if not _is_trivial_unit(u)]
 
 
 # ---------------------------------------------------------------------------
@@ -813,9 +1044,14 @@ def generate_from_repo(config) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
 
     units = scan_repo(config)
     units = _filter_units_by_config(units, config)
+    if getattr(config, "validate_syntax", False):
+        units = _filter_invalid_syntax(units)
+    if getattr(config, "reject_trivial", False):
+        units = _filter_trivial_units(units)
     units = _cap_units(units, config.target_records)
     style = _style_from_config(config)
-    return _split_records(units, config.holdout_ratio, style=style)
+    strategy = getattr(config, "holdout_strategy", "hash")
+    return _split_records(units, config.holdout_ratio, style=style, strategy=strategy)
 
 
 # ---------------------------------------------------------------------------
@@ -899,13 +1135,22 @@ def main() -> None:
     units = scan_repo(config)
     print(f"  Found {len(units)} units")
     units = _filter_units_by_config(units, config)
+    if getattr(config, "validate_syntax", False):
+        before = len(units)
+        units = _filter_invalid_syntax(units)
+        print(f"  Syntax validation: dropped {before - len(units)} malformed units")
+    if getattr(config, "reject_trivial", False):
+        before = len(units)
+        units = _filter_trivial_units(units)
+        print(f"  Trivial rejection: dropped {before - len(units)} units")
     units = _cap_units(units, config.target_records)
     print(f"  After filter/cap: {len(units)} units")
 
     # Derive trace style from config so written records honor thinking_style.
     style = _style_from_config(config)
+    strategy = getattr(config, "holdout_strategy", "hash")
     train_records, holdout_records = _split_records(
-        units, config.holdout_ratio, style=style
+        units, config.holdout_ratio, style=style, strategy=strategy
     )
     print(
         f"  Split: {len(train_records)} train / {len(holdout_records)} holdout "
