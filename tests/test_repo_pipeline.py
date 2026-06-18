@@ -1117,7 +1117,7 @@ from scripts.repo.generate_from_code import (
     generate_code_thinking,
 )
 
-# Concrete property unit matching the real-world amesh example.
+# Concrete property unit (a @property method) as a representative example.
 _PROP_UNIT = {
     "type": "method",
     "name": "identity",
