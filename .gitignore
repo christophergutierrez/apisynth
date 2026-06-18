@@ -11,6 +11,14 @@ apis/*
 # ...except videoamp, which is the reference implementation (scripts committed)
 !apis/videoamp/
 !apis/videoamp/**
+
+# Specific code-path repo configs (local only — not part of the generic framework).
+# Same convention as apis/* above: repos/* so the negation can re-include the
+# example; only the generic example demonstrator is tracked.
+repos/*
+# ...except the example, which is the template pointing at the in-tree fixture.
+!repos/example/
+!repos/example/**
 handoff/
 .fastembed_cache/
 .hermes/
