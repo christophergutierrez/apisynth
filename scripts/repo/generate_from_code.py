@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import sys
@@ -832,6 +833,54 @@ def _cap_units(units: List[Dict[str, Any]], target_records: int) -> List[Dict[st
 
 
 # ---------------------------------------------------------------------------
+# Syntax validation helpers (Milestone 3.2)
+# ---------------------------------------------------------------------------
+
+def _signature_well_formed(sig) -> bool:
+    """Return True when sig is a valid definition-style signature fragment.
+
+    Validation form: wrap as ``def {sig}: pass`` and attempt ``ast.parse``.
+    This is the correct form because scanner-emitted signatures are
+    definition-style fragments (e.g. ``f(obj: Any)``, ``f(*, k: str)``,
+    ``Foo(x: int)``) rather than call expressions.
+
+    - If sig is None, empty, or not a str → return True (absence of a
+      signature is not a malformation; nothing to reject on).
+    - If ast.parse succeeds → True.
+    - If SyntaxError, ValueError, or TypeError is raised → False.
+    """
+    if not isinstance(sig, str) or not sig:
+        return True
+    try:
+        ast.parse(f"def {sig}: pass")
+        return True
+    except (SyntaxError, ValueError, TypeError):
+        return False
+
+
+def _unit_syntax_ok(unit: Dict[str, Any]) -> bool:
+    """Return True iff both scanner-provided signature fields are well-formed.
+
+    Only validates 'signature' and 'call_signature' (the real scanner fields).
+    Missing keys pass — absence of a field is not a malformation. Does NOT
+    validate the synthesised stub from _signature_for (the ``name(...)``
+    placeholder is intentional and ``def name(...): pass`` is invalid).
+    """
+    return (
+        _signature_well_formed(unit.get("signature"))
+        and _signature_well_formed(unit.get("call_signature"))
+    )
+
+
+def _filter_invalid_syntax(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return units whose scanner-provided signatures are syntactically valid.
+
+    Preserves input order (deterministic). Units with no signature fields pass.
+    """
+    return [u for u in units if _unit_syntax_ok(u)]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -883,6 +932,8 @@ def generate_from_repo(config) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
 
     units = scan_repo(config)
     units = _filter_units_by_config(units, config)
+    if getattr(config, "validate_syntax", False):
+        units = _filter_invalid_syntax(units)
     units = _cap_units(units, config.target_records)
     style = _style_from_config(config)
     strategy = getattr(config, "holdout_strategy", "hash")
@@ -970,6 +1021,10 @@ def main() -> None:
     units = scan_repo(config)
     print(f"  Found {len(units)} units")
     units = _filter_units_by_config(units, config)
+    if getattr(config, "validate_syntax", False):
+        before = len(units)
+        units = _filter_invalid_syntax(units)
+        print(f"  Syntax validation: dropped {before - len(units)} malformed units")
     units = _cap_units(units, config.target_records)
     print(f"  After filter/cap: {len(units)} units")
 

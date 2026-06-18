@@ -20,6 +20,7 @@ DEFAULT_TARGET_RECORDS = 500
 DEFAULT_HOLDOUT_RATIO = 0.15
 DEFAULT_THINKING_STYLE = "deterministic"
 DEFAULT_HOLDOUT_STRATEGY = "hash"
+DEFAULT_VALIDATE_SYNTAX = False
 
 
 @dataclass
@@ -40,6 +41,7 @@ class RepoConfig:
     branch: str | None = None
     commit: str | None = None
     manual_overrides: str | None = None
+    validate_syntax: bool = DEFAULT_VALIDATE_SYNTAX
 
 
 def _ensure_list(value, default):
@@ -135,6 +137,7 @@ def load_repo_config(config_path: str | Path) -> RepoConfig:
         branch=identity.get("branch") if isinstance(identity.get("branch"), str) else None,
         commit=identity.get("commit") if isinstance(identity.get("commit"), str) else None,
         manual_overrides=raw_manual_overrides,
+        validate_syntax=bool(generation_section.get("validate_syntax", DEFAULT_VALIDATE_SYNTAX)),
     )
 
     # Validation

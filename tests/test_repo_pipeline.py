@@ -457,3 +457,357 @@ def test_target_records_caps_output():
         assert len(keys1) == 5, f"Expected 5 records, got {len(keys1)}"
         # Determinism: both runs select the exact same 5 units.
         assert sorted(keys1) == sorted(keys2), "Capped selection is not deterministic"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3.2: syntax validation helpers and pipeline integration
+# ---------------------------------------------------------------------------
+
+from scripts.repo.generate_from_code import (
+    _signature_well_formed,
+    _unit_syntax_ok,
+    _filter_invalid_syntax,
+    generate_from_repo,
+)
+from scripts.repo.loader import RepoConfig
+
+
+def _make_config(**kwargs) -> RepoConfig:
+    """Build a minimal RepoConfig for unit testing (no path validation)."""
+    defaults = dict(
+        name="test",
+        path=None,
+        url="https://example.com/repo.git",  # skip local-path check
+        target_records=500,
+        holdout_ratio=0.15,
+    )
+    defaults.update(kwargs)
+    return RepoConfig(**defaults)
+
+
+# --- _signature_well_formed ---
+
+class TestSignatureWellFormed:
+    """Tests for the _signature_well_formed helper."""
+
+    def test_plain_empty_params(self):
+        assert _signature_well_formed("f()") is True
+
+    def test_simple_params(self):
+        assert _signature_well_formed("f(a, b)") is True
+
+    def test_with_default(self):
+        assert _signature_well_formed("f(a, b=1)") is True
+
+    def test_type_annotation(self):
+        assert _signature_well_formed("f(obj: Any)") is True
+
+    def test_keyword_only(self):
+        assert _signature_well_formed("f(*, k: str)") is True
+
+    def test_positional_only(self):
+        assert _signature_well_formed("f(a, /, b)") is True
+
+    def test_class_form(self):
+        # Class units emit ClassName(params) — same wrap works
+        assert _signature_well_formed("Foo(x: int)") is True
+
+    def test_complex_mixed(self):
+        assert _signature_well_formed("f(a, b: int, *, c: str = 'x')") is True
+
+    def test_malformed_double_arg(self):
+        assert _signature_well_formed("f(1 2)") is False
+
+    def test_malformed_keyword_in_params(self):
+        assert _signature_well_formed("f(def)") is False
+
+    def test_malformed_double_comma(self):
+        assert _signature_well_formed("f(a, , b)") is False
+
+    def test_malformed_unclosed_paren(self):
+        assert _signature_well_formed("f(") is False
+
+    def test_none_returns_true(self):
+        assert _signature_well_formed(None) is True
+
+    def test_empty_string_returns_true(self):
+        assert _signature_well_formed("") is True
+
+    def test_non_string_int_returns_true(self):
+        assert _signature_well_formed(42) is True
+
+    def test_non_string_list_returns_true(self):
+        assert _signature_well_formed([]) is True
+
+
+# --- _unit_syntax_ok ---
+
+class TestUnitSyntaxOk:
+    """Tests for the _unit_syntax_ok helper."""
+
+    def test_unit_with_valid_signature(self):
+        unit = {"type": "function", "name": "f", "file": "a.py", "signature": "f(x: int)"}
+        assert _unit_syntax_ok(unit) is True
+
+    def test_unit_with_malformed_signature_is_rejected(self):
+        unit = {"type": "function", "name": "f", "file": "a.py", "signature": "f(1 2)"}
+        assert _unit_syntax_ok(unit) is False
+
+    def test_unit_with_malformed_call_signature_is_rejected(self):
+        unit = {
+            "type": "method", "name": "m", "file": "a.py",
+            "signature": "m(self, x: int)",
+            "call_signature": "m(1 2)",
+        }
+        assert _unit_syntax_ok(unit) is False
+
+    def test_unit_with_no_signature_passes(self):
+        unit = {"type": "function", "name": "f", "file": "a.py"}
+        assert _unit_syntax_ok(unit) is True
+
+    def test_unit_with_valid_both_signatures(self):
+        unit = {
+            "type": "method", "name": "m", "file": "a.py",
+            "signature": "m(self, x: int)",
+            "call_signature": "m(x: int)",
+        }
+        assert _unit_syntax_ok(unit) is True
+
+
+# --- _filter_invalid_syntax ---
+
+class TestFilterInvalidSyntax:
+    """Tests for the _filter_invalid_syntax helper."""
+
+    def test_drops_unit_with_malformed_signature(self):
+        good = {"type": "function", "name": "good", "file": "a.py", "signature": "good(x)"}
+        bad = {"type": "function", "name": "bad", "file": "a.py", "signature": "bad(1 2)"}
+        result = _filter_invalid_syntax([good, bad])
+        assert result == [good]
+
+    def test_drops_unit_with_malformed_call_signature(self):
+        good = {"type": "method", "name": "m", "file": "a.py", "signature": "m(self)"}
+        bad = {
+            "type": "method", "name": "bad", "file": "a.py",
+            "signature": "bad(self)",
+            "call_signature": "bad(def)",
+        }
+        result = _filter_invalid_syntax([good, bad])
+        assert result == [good]
+
+    def test_keeps_units_with_no_signature(self):
+        unit = {"type": "function", "name": "f", "file": "a.py"}
+        result = _filter_invalid_syntax([unit])
+        assert result == [unit]
+
+    def test_preserves_order(self):
+        units = [
+            {"type": "function", "name": f"f{i}", "file": "a.py", "signature": f"f{i}(x)"}
+            for i in range(5)
+        ]
+        result = _filter_invalid_syntax(units)
+        assert result == units
+
+    def test_empty_input(self):
+        assert _filter_invalid_syntax([]) == []
+
+    def test_all_malformed_returns_empty(self):
+        units = [
+            {"type": "function", "name": "f", "file": "a.py", "signature": "f(1 2)"},
+            {"type": "function", "name": "g", "file": "a.py", "signature": "g(def)"},
+        ]
+        assert _filter_invalid_syntax(units) == []
+
+
+# --- Pipeline opt-in (validate_syntax flag) ---
+
+class TestPipelineValidateSyntaxFlag:
+    """Tests for the validate_syntax flag wired into generate_from_repo."""
+
+    def test_malformed_unit_excluded_when_flag_is_true(self):
+        """With validate_syntax=True, a unit with a malformed signature is excluded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir()
+            (repo_dir / "mod.py").write_text("def good(x): pass\n")
+
+            cfg_dir = tmp_path / "cfg"
+            cfg_dir.mkdir()
+            (cfg_dir / "repo.yaml").write_text(
+                f"name: testrepo\npath: {repo_dir}\n"
+                "generation:\n"
+                "  validate_syntax: true\n"
+            )
+
+            from scripts.repo.loader import load_repo_config
+            config = load_repo_config(cfg_dir / "repo.yaml")
+            assert config.validate_syntax is True
+
+            # Inject a malformed unit by scanning then calling helpers directly
+            from scripts.repo.scan_repo import scan_repo
+            from scripts.repo.generate_from_code import _filter_units_by_config, _filter_invalid_syntax
+
+            units = scan_repo(config)
+            units_filtered = _filter_units_by_config(units, config)
+            # All real units should pass (no malformed sigs from scanner)
+            valid_units = _filter_invalid_syntax(units_filtered)
+            assert len(valid_units) == len(units_filtered), (
+                "Real scanner units should all pass syntax validation"
+            )
+
+            # Now test with a hand-injected malformed unit
+            malformed = {
+                "type": "function", "name": "bad", "file": "mod.py",
+                "signature": "bad(1 2)",
+            }
+            mixed = units_filtered + [malformed]
+            result = _filter_invalid_syntax(mixed)
+            assert malformed not in result, "Malformed unit must be excluded"
+            assert len(result) == len(units_filtered), "Good units must be preserved"
+
+    def test_flag_false_does_not_filter_end_to_end(self, monkeypatch):
+        """With validate_syntax=False, generate_from_repo keeps a malformed unit.
+
+        This exercises the backward-compat guard in generate_from_repo END TO END
+        by monkeypatching scan_repo to return a hand-built malformed unit. If the
+        `if getattr(config, "validate_syntax", False):` guard were removed (making
+        the pipeline always filter), this test would FAIL because the malformed
+        unit would be dropped.
+        """
+        good = {"type": "function", "name": "good_fn", "file": "mod.py", "signature": "good_fn(x)"}
+        bad = {"type": "function", "name": "bad_fn", "file": "mod.py", "signature": "bad_fn(1 2)"}
+
+        # generate_from_repo does `from scripts.repo.scan_repo import scan_repo`
+        # as a LOCAL import, so patch the source-module attribute.
+        monkeypatch.setattr(
+            "scripts.repo.scan_repo.scan_repo", lambda config: [good, bad]
+        )
+
+        config = _make_config(validate_syntax=False, extraction_units=["functions"])
+        train, holdout = generate_from_repo(config)
+
+        names = {r["output"]["name"] for r in (train + holdout)}
+        assert "good_fn" in names, "Clean unit must be present"
+        assert "bad_fn" in names, (
+            "Malformed unit must SURVIVE when validate_syntax=False (guard off)"
+        )
+
+    def test_flag_true_filters_end_to_end(self, monkeypatch):
+        """With validate_syntax=True, generate_from_repo drops a malformed unit.
+
+        Exercises the guard's enabled branch end to end via generate_from_repo.
+        """
+        good = {"type": "function", "name": "good_fn", "file": "mod.py", "signature": "good_fn(x)"}
+        bad = {"type": "function", "name": "bad_fn", "file": "mod.py", "signature": "bad_fn(1 2)"}
+
+        monkeypatch.setattr(
+            "scripts.repo.scan_repo.scan_repo", lambda config: [good, bad]
+        )
+
+        config = _make_config(validate_syntax=True, extraction_units=["functions"])
+        train, holdout = generate_from_repo(config)
+
+        names = {r["output"]["name"] for r in (train + holdout)}
+        assert "good_fn" in names, "Clean unit must be present"
+        assert "bad_fn" not in names, (
+            "Malformed unit must be DROPPED when validate_syntax=True (guard on)"
+        )
+
+    def test_default_config_has_validate_syntax_false(self):
+        """Default RepoConfig has validate_syntax=False."""
+        config = _make_config()
+        assert config.validate_syntax is False
+
+
+# --- Determinism ---
+
+class TestSyntaxValidationDeterminism:
+    """Syntax filter produces identical output across two calls."""
+
+    def test_same_input_same_output(self):
+        units = [
+            {"type": "function", "name": f"f{i}", "file": "a.py", "signature": f"f{i}(x: int)"}
+            for i in range(10)
+        ]
+        # Insert a malformed one in the middle
+        units.insert(5, {"type": "function", "name": "bad", "file": "a.py", "signature": "bad(1 2)"})
+        result1 = _filter_invalid_syntax(units)
+        result2 = _filter_invalid_syntax(units)
+        assert result1 == result2
+
+
+# --- Loader round-trip ---
+
+class TestLoaderValidateSyntaxRoundtrip:
+    """validate_syntax round-trips through load_repo_config."""
+
+    def test_validate_syntax_true_from_yaml(self):
+        """repo.yaml with validate_syntax: true loads to config.validate_syntax is True."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir()
+            cfg_path = tmp_path / "repo.yaml"
+            cfg_path.write_text(
+                f"name: vs-test\npath: {repo_dir}\n"
+                "generation:\n"
+                "  validate_syntax: true\n"
+            )
+            from scripts.repo.loader import load_repo_config
+            config = load_repo_config(cfg_path)
+            assert config.validate_syntax is True
+
+    def test_validate_syntax_omitted_defaults_to_false(self):
+        """When validate_syntax is absent from YAML, config.validate_syntax is False."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir()
+            cfg_path = tmp_path / "repo.yaml"
+            cfg_path.write_text(f"name: vs-default\npath: {repo_dir}\n")
+            from scripts.repo.loader import load_repo_config
+            config = load_repo_config(cfg_path)
+            assert config.validate_syntax is False
+
+    def test_validate_syntax_false_from_yaml(self):
+        """repo.yaml with validate_syntax: false loads to config.validate_syntax is False."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir()
+            cfg_path = tmp_path / "repo.yaml"
+            cfg_path.write_text(
+                f"name: vs-false\npath: {repo_dir}\n"
+                "generation:\n"
+                "  validate_syntax: false\n"
+            )
+            from scripts.repo.loader import load_repo_config
+            config = load_repo_config(cfg_path)
+            assert config.validate_syntax is False
+
+
+# --- Real-data no-op guard ---
+
+class TestRealDataNoopGuard:
+    """Annotated/kw-only/posonly signatures from a real scanner must NOT be dropped."""
+
+    def test_annotated_signatures_not_dropped(self):
+        """Units with annotation-style signatures all pass the syntax filter."""
+        units = [
+            {"type": "function", "name": "f1", "file": "a.py", "signature": "f1(obj: Any)"},
+            {"type": "function", "name": "f2", "file": "a.py", "signature": "f2(*, k: str)"},
+            {"type": "function", "name": "f3", "file": "a.py", "signature": "f3(a, /, b)"},
+            {"type": "function", "name": "f4", "file": "a.py", "signature": "f4(a, b=1)"},
+            {"type": "class", "name": "Foo", "file": "a.py", "signature": "Foo(x: int)"},
+            {
+                "type": "method", "name": "m", "file": "a.py",
+                "signature": "m(self, x: int, *, flag: bool = False)",
+                "call_signature": "m(x: int, *, flag: bool = False)",
+            },
+        ]
+        result = _filter_invalid_syntax(units)
+        assert result == units, (
+            f"Some valid annotated units were wrongly dropped: "
+            f"{[u['name'] for u in units if u not in result]}"
+        )
