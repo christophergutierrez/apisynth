@@ -167,6 +167,86 @@ the same `question` and `chosen` but different `rejected` values.
 
 ---
 
+## Code-path formats
+
+The repo/code path (see [REPO_SOURCES.md](REPO_SOURCES.md)) emits records with a `type: "code"`
+discriminator and a structured `output` dict instead of an `api_call`. These are produced by
+`scripts/repo/*` and `scripts/repo_pipeline.py`, and verified offline by the code rubric in
+`eval.py` rather than by a live API.
+
+### Code training.jsonl
+
+Written by `generate_from_code.py` (via `repo_pipeline.py`). One JSON object per line.
+
+```json
+{
+  "type": "code",
+  "question": "How do I use `scan_repo`?",
+  "thinking": "Entity: function scan_repo\nFile: scripts/repo/scan_repo.py\nScope: single unit -- top-level function\nUse: call scan_repo(config)",
+  "output": {
+    "unit": "function",
+    "name": "scan_repo",
+    "file": "scripts/repo/scan_repo.py",
+    "signature": "scan_repo(config)"
+  }
+}
+```
+
+**`type`** — Always `"code"` for code-path records (distinguishes them from API-path records).
+
+**`output`** — The structured answer. Required keys:
+- `unit` — one of `function`, `method`, `class`, `api_call` (mirrors the scanner's unit type).
+- `name` — the identifier.
+- `file` — repo-relative POSIX path to the defining file.
+- `signature` — best-effort signature string (a definition fragment for defs; a call-site form
+  for `api_call`).
+- `class` — present **only** for `method` units; names the parent class.
+
+**`thinking`** — Deterministic reasoning trace generated from the known-correct `output` (linear
+by default, QOC when `thinking_style: hybrid`). Never distilled from a teacher model.
+
+**`source`** — Optional provenance tag. `"evol"` on records produced by `evolve_code_questions.py`
+(which also add `evol_axis` and `evol_seed`); `"bootstrap"` on records produced by
+`bootstrap_code_traces.py`. Absent on freshly generated records.
+
+**Holdout split** — Deterministic. The default `hash` strategy assigns a unit to holdout when
+`sha256("<file>:<name>") / 2**256 < holdout_ratio` (stable across processes and `PYTHONHASHSEED`,
+never the salted builtin `hash()`). The optional `stratified` strategy holds out exactly
+`round(holdout_ratio·n)` units per unit type. Holdout records share this schema and are written to
+`holdout.jsonl` alongside `training.jsonl`.
+
+### Code dpo.jsonl
+
+Written by `gen_code_dpo.py`. The `chosen`/`rejected` values are `output` dicts (not API calls).
+
+```json
+{
+  "type": "code",
+  "question": "How do I use `scan_repo`?",
+  "chosen":   {"unit": "function", "name": "scan_repo", "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(config)"},
+  "rejected": {"unit": "function", "name": "scan_repo_TYPO", "file": "scripts/repo/scan_repo.py", "signature": "scan_repo(config)"}
+}
+```
+
+**`chosen`** — The correct `output`. **`rejected`** — a deterministically corrupted, strictly-worse
+variant (differs from chosen AND is either malformed or has `field_accuracy < 1.0`). One pair is
+written per source record.
+
+### Code router_train.jsonl / router_test.jsonl
+
+Written by `gen_code_router_data.py`. Same `{question, route_key}` shape as the API router, but the
+`route_key` is the unit's relative **file path** (`output["file"]`) — "which file does this question
+target" — rather than `vendor/api/name`.
+
+```json
+{"question": "How do I use `scan_repo`?", "route_key": "scripts/repo/scan_repo.py"}
+```
+
+Split with a fixed `SEED = 42` and `TRAIN_RATIO = 0.8`. Trained by `train_code_router.py` into
+`code_router_classifier.joblib`.
+
+---
+
 ## ShareGPT format (prepare_data.py output)
 
 The format expected by trainLLM for SFT. Produced by `prepare_data.py`.

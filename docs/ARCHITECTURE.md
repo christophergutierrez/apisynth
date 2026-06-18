@@ -161,6 +161,56 @@ outputs wrong" failure mode).
 
 ---
 
+## The code/repo path — validators as the verifier
+
+apisynth has a second data-generation path that targets **source-code repositories** instead of a
+live REST API. Its design mirrors the API path component-for-component, with one substitution at the
+core: where the API path uses **the live API as the verifier**, the code path uses **deterministic
+structural validators** (`eval.py`'s code rubric). The full guide is
+[REPO_SOURCES.md](REPO_SOURCES.md); the architecture rationale:
+
+```
+repo.yaml               ← describes the repository (path/url, include globs, extraction units)
+    │
+    ▼
+repo_pipeline.py        ← orchestrates scan → generate (the pipeline.py analog)
+    │
+    ├── scan_repo.py        ← ast-extracts code units {function, method, class, api_call}
+    │
+    └── generate_from_code.py ← one record per unit: question + deterministic thinking + output,
+                                then a SHA-256 deterministic train/holdout split
+    │
+    ▼
+training.jsonl ({type:"code", ...})   ← optionally augmented, all verified offline:
+    ├── gen_code_dpo.py          ← preference pairs; validators decide chosen vs rejected
+    ├── evolve_code_questions.py ← deterministic template paraphrase (NO LLM, unlike the API path)
+    ├── gen_code_router_data.py + train_code_router.py ← route by target file path
+    └── bootstrap_code_traces.py ← STaR: model proposes, validators verify (no exec sandbox)
+```
+
+**Why validators instead of a live API.** The "answer" for a code question is a structural fact —
+which function/method/class a question is about — that can be checked exactly against the scanned
+ground truth. So the same role the live API plays for the API path (rejecting hallucinated
+parameter combinations) is played here by three offline checks: format validity
+(`code_format_score`), AST well-formedness of the signature (`code_signature_valid`), and
+exact field match against the scanned unit (`code_field_accuracy`). This keeps the entire path
+**offline and key-free** — the only network call is STaR bootstrap's model inference, and even those
+outputs are verified offline. It also keeps everything **deterministic**: SHA-256 of `<file>:<name>`
+for hashing, fixed `SEED = 42` for shuffles, and no unseeded randomness anywhere.
+
+**Where it diverges from the API path.** Two stages are deliberately different:
+- `evolve_code_questions.py` is **fully deterministic template-based** paraphrase — it does *not*
+  call an LLM, whereas the API path's `evolve_questions.py` calls Claude.
+- `bootstrap_code_traces.py` has **no live execution sandbox**; the Phase-3 validators are the
+  execution-feedback stand-in (strict field-accuracy match against gold, or format+signature for
+  free-form prompts).
+
+The backward-trace principle (generate the trace from the known-correct answer) carries over
+unchanged: traces are built from each unit's `output`, so reasoning is always consistent with the
+correct code unit.
+
+---
+
 ## Directory structure rationale
 
 ```
