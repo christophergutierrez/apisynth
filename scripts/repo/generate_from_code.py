@@ -212,11 +212,53 @@ def _doc_suffix(unit: Dict[str, Any]) -> str:
     return f"\nDoc: {d}" if d else ""
 
 
+def _module_path(file_path: str) -> str:
+    """Convert a file path to a Python module path.
+
+    'python/src/amesh/agents/resource_agent.py' → 'amesh.agents.resource_agent'
+    Strips leading 'python/', 'src/', and the '.py' extension.
+    """
+    p = file_path
+    if p.endswith(".py"):
+        p = p[:-3]
+    parts = p.split("/")
+    # Drop common non-package prefixes
+    while parts and parts[0] in ("python", "src"):
+        parts = parts[1:]
+    return ".".join(parts)
+
+
+def _neighbors_suffix(
+    unit: Dict[str, Any],
+    file_siblings: Optional[Dict[str, List[str]]],
+    max_names: int = 6,
+) -> str:
+    """Return a 'Module: …\\nNeighbors: …' block when sibling info is available."""
+    if not file_siblings:
+        return ""
+    file_path = unit["file"]
+    siblings = file_siblings.get(file_path)
+    if not siblings:
+        return ""
+    own_name = unit["name"]
+    others = [n for n in siblings if n != own_name]
+    if not others:
+        return ""
+    module = _module_path(file_path)
+    sample = others[:max_names]
+    suffix = f"\nModule: {module}"
+    if len(others) > max_names:
+        suffix += f"\nNeighbors: {', '.join(sample)}, … (+{len(others) - max_names} more)"
+    else:
+        suffix += f"\nNeighbors: {', '.join(sample)}"
+    return suffix
+
+
 # ---------------------------------------------------------------------------
 # Thinking trace generators — LINEAR style (Entity/Scope/Use/NOT)
 # ---------------------------------------------------------------------------
 
-def _linear_function(unit: Dict[str, Any]) -> str:
+def _linear_function(unit: Dict[str, Any], file_siblings: Optional[Dict[str, List[str]]] = None) -> str:
     """Linear trace for a top-level function unit."""
     name = unit["name"]
     file_path = unit["file"]
@@ -229,6 +271,7 @@ def _linear_function(unit: Dict[str, Any]) -> str:
         f"Scope: single unit — top-level function\n"
         f"Use: call {sig}\n"
         f"Params: see function signature in {file_path}"
+        f"{_neighbors_suffix(unit, file_siblings)}"
     )
 
 
@@ -242,7 +285,7 @@ def _is_property_unit(unit: Dict[str, Any]) -> bool:
     return bool(unit.get("is_property"))
 
 
-def _linear_method(unit: Dict[str, Any]) -> str:
+def _linear_method(unit: Dict[str, Any], file_siblings: Optional[Dict[str, List[str]]] = None) -> str:
     """Linear trace for a method unit.
 
     Classless method units (no 'class' key) must NOT emit the literal 'None'.
@@ -255,6 +298,7 @@ def _linear_method(unit: Dict[str, Any]) -> str:
     cls = unit.get("class") or ""  # guard against None and missing key
     location = f"{file_path}:{lineno}" if lineno is not None else file_path
     call = _call_form(unit)
+    nb = _neighbors_suffix(unit, file_siblings)
 
     # Property: takes precedence over static/class and instance branches.
     if _is_property_unit(unit):
@@ -265,6 +309,7 @@ def _linear_method(unit: Dict[str, Any]) -> str:
                 f"Scope: single unit — property (computed attribute)\n"
                 f"Use: instance.{name}  # property — attribute access, no parentheses (instance is a {cls})\n"
                 f"NOT: calling instance.{name}() — {name} is a property, accessed without ()"
+                f"{nb}"
             )
         else:
             return (
@@ -273,6 +318,7 @@ def _linear_method(unit: Dict[str, Any]) -> str:
                 f"Scope: single unit — property (computed attribute)\n"
                 f"Use: instance.{name}  # property — attribute access, no parentheses\n"
                 f"NOT: calling instance.{name}() — {name} is a property, accessed without ()"
+                f"{nb}"
             )
 
     # Static/class methods: only emit class-level form when cls is known.
@@ -285,6 +331,7 @@ def _linear_method(unit: Dict[str, Any]) -> str:
                 f"Scope: single unit — static method\n"
                 f"Use: {cls}.{call}  # static method — no instance needed\n"
                 f"NOT: passing self or cls — a static method receives neither (calling via an instance is allowed but unnecessary)"
+                f"{nb}"
             )
         else:  # "class"
             return (
@@ -293,6 +340,7 @@ def _linear_method(unit: Dict[str, Any]) -> str:
                 f"Scope: single unit — class method\n"
                 f"Use: {cls}.{call}  # classmethod — cls is bound automatically\n"
                 f"NOT: passing cls explicitly — Python binds it to {cls}"
+                f"{nb}"
             )
 
     # Plain instance methods (and static/class methods lacking a class name).
@@ -313,10 +361,11 @@ def _linear_method(unit: Dict[str, Any]) -> str:
         f"Scope: single unit — instance method\n"
         f"{use_line}\n"
         f"NOT: calling {name}() as a standalone function"
+        f"{nb}"
     )
 
 
-def _linear_class(unit: Dict[str, Any]) -> str:
+def _linear_class(unit: Dict[str, Any], file_siblings: Optional[Dict[str, List[str]]] = None) -> str:
     """Linear trace for a class unit."""
     name = unit["name"]
     file_path = unit["file"]
@@ -329,10 +378,11 @@ def _linear_class(unit: Dict[str, Any]) -> str:
         f"Scope: single unit — class definition\n"
         f"Use: instantiate with {sig}\n"
         f"Params: see __init__ in {file_path}"
+        f"{_neighbors_suffix(unit, file_siblings)}"
     )
 
 
-def _linear_api_call(unit: Dict[str, Any]) -> str:
+def _linear_api_call(unit: Dict[str, Any], file_siblings: Optional[Dict[str, List[str]]] = None) -> str:
     """Linear trace for an api_call unit."""
     name = unit["name"]
     file_path = unit["file"]
@@ -345,20 +395,21 @@ def _linear_api_call(unit: Dict[str, Any]) -> str:
         f"Scope: single call site — HTTP/API invocation\n"
         f"Use: {sig}\n"
         f"NOT: a plain dict.get() or queue.get() — this is an HTTP/API call"
+        f"{_neighbors_suffix(unit, file_siblings)}"
     )
 
 
-def _make_thinking_linear(unit: Dict[str, Any]) -> str:
+def _make_thinking_linear(unit: Dict[str, Any], file_siblings: Optional[Dict[str, List[str]]] = None) -> str:
     """Dispatch to the appropriate linear-style per-type helper."""
     unit_type = unit["type"]
     if unit_type == "function":
-        return _linear_function(unit)
+        return _linear_function(unit, file_siblings=file_siblings)
     if unit_type == "method":
-        return _linear_method(unit)
+        return _linear_method(unit, file_siblings=file_siblings)
     if unit_type == "class":
-        return _linear_class(unit)
+        return _linear_class(unit, file_siblings=file_siblings)
     if unit_type == "api_call":
-        return _linear_api_call(unit)
+        return _linear_api_call(unit, file_siblings=file_siblings)
     # Fallback (should not occur with known scanner types)
     name = unit["name"]
     file_path = unit["file"]
@@ -368,6 +419,7 @@ def _make_thinking_linear(unit: Dict[str, Any]) -> str:
         f"Entity: {unit_type} {name}\n"
         f"File: {location}\n"
         f"Scope: single unit"
+        f"{_neighbors_suffix(unit, file_siblings)}"
     )
 
 
@@ -527,7 +579,7 @@ def _make_thinking_qoc(unit: Dict[str, Any]) -> str:
 # Public thinking dispatcher
 # ---------------------------------------------------------------------------
 
-def generate_code_thinking(unit: Dict[str, Any], style: str = "linear") -> str:
+def generate_code_thinking(unit: Dict[str, Any], style: str = "linear", file_siblings: Optional[Dict[str, List[str]]] = None) -> str:
     """Return a deterministic thinking trace for the given code unit.
 
     Args:
@@ -551,14 +603,14 @@ def generate_code_thinking(unit: Dict[str, Any], style: str = "linear") -> str:
     if style == "qoc":
         return _make_thinking_qoc(unit)
     # 'linear' is the default; any unknown style also falls back here.
-    return _make_thinking_linear(unit)
+    return _make_thinking_linear(unit, file_siblings=file_siblings)
 
 
 # Keep the original name as an internal alias for backward compatibility with
 # existing direct test imports that call _make_thinking(unit) with one argument.
-def _make_thinking(unit: Dict[str, Any], style: str = "linear") -> str:
+def _make_thinking(unit: Dict[str, Any], style: str = "linear", file_siblings: Optional[Dict[str, List[str]]] = None) -> str:
     """Return a deterministic thinking trace (backward-compatible wrapper)."""
-    return generate_code_thinking(unit, style=style)
+    return generate_code_thinking(unit, style=style, file_siblings=file_siblings)
 
 
 # ---------------------------------------------------------------------------
@@ -707,7 +759,7 @@ def _style_from_config(config) -> str:
 # Record construction
 # ---------------------------------------------------------------------------
 
-def _make_record(unit: Dict[str, Any], style: str = "linear") -> Dict[str, Any]:
+def _make_record(unit: Dict[str, Any], style: str = "linear", file_siblings: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     """Convert a scanner unit into a training record."""
     output: Dict[str, Any] = {
         "unit": unit["type"],
@@ -722,7 +774,7 @@ def _make_record(unit: Dict[str, Any], style: str = "linear") -> Dict[str, Any]:
     return {
         "type": "code",
         "question": _pick_question(unit),
-        "thinking": _make_thinking(unit, style=style),
+        "thinking": _make_thinking(unit, style=style, file_siblings=file_siblings),
         "output": output,
     }
 
@@ -840,10 +892,15 @@ def _split_records(
     train_records: List[Dict[str, Any]] = []
     holdout_records: List[Dict[str, Any]] = []
 
+    # Build file → sibling names index for think-block enrichment.
+    file_siblings: Dict[str, List[str]] = {}
+    for unit in units:
+        file_siblings.setdefault(unit["file"], []).append(unit["name"])
+
     if strategy == "stratified":
         holdout_keys = _stratified_holdout_keys(units, holdout_ratio)
         for unit in units:
-            record = _make_record(unit, style=style)
+            record = _make_record(unit, style=style, file_siblings=file_siblings)
             if _stratified_unit_key(unit) in holdout_keys:
                 holdout_records.append(record)
             else:
@@ -851,7 +908,7 @@ def _split_records(
     else:
         # "hash" strategy: original per-unit threshold path (byte-identical to prior).
         for unit in units:
-            record = _make_record(unit, style=style)
+            record = _make_record(unit, style=style, file_siblings=file_siblings)
             if _in_holdout(unit, holdout_ratio):
                 holdout_records.append(record)
             else:
