@@ -64,6 +64,12 @@ def extract_identifiers(question: str) -> tuple[str, str | None]:
     else:
         target = backticks[-1]
 
+    # Handle Class.method syntax (e.g. `VaultClient.__init__`)
+    if "." in target and class_ctx is None:
+        parts = target.rsplit(".", 1)
+        class_ctx = parts[0]
+        target = parts[1]
+
     return target, class_ctx
 
 
